@@ -23,7 +23,7 @@ The agent is on the phone and must not spend time reading. A card appears when t
 - recommendation: the next best action or an offer worth making, grounded in the record or a tool output; source names where it comes from.
 - tell: a result the agent must relay, with the numbers (a copay, a ready time, a confirmation number, a date).
 - say: a short suggested phrasing for a moment that is delicate or easy to get wrong (a pushback, a refusal, a correction); one sentence, never a routine line.
-- do: an action with a detail that matters (run the 90-day claim, not 30; confirm the channel before sending).
+- do: an action with a detail that matters (run the 90-day claim, not 30; confirm the channel before sending). Never a card that only says to run the suggested tool: suggestedTool already flashes that tool on screen.
 - ask: a question that is required but easy to forget.
 Timing: the card must land BEFORE the agent responds, so it is triggered by what the caller just said or what a tool just returned; a policy reminder the agent needs for the next sentence is exactly what belongs here.
 Rules: text under 18 words, at most 3 bullets of under 12 words each; usually 0 or 1 card, never more than 2. Never repeat a card already shown unless the situation changed. source is "" when nothing backs the card. Never invent policy, prices or eligibility; use only the knowledge base, the customer record and tool outputs.

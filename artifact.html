@@ -1511,7 +1511,7 @@ h2, h3 { margin: 0; }
     if (!cards || !cards.length) return;
     Store.set((s) => {
       const batch = s.batch + 1;
-      const fresh = cards.map((c) => ({ id: nextId(), batch, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()) : [], source: c.source || '' }));
+      const fresh = cards.map((c) => ({ id: nextId(), batch, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()).slice(0, 3) : [], source: c.source || '' }));
       return { batch, guidance: s.guidance.concat(fresh).slice(-60), unseenGuidance: s.tab === 'guidance' ? 0 : s.unseenGuidance + fresh.length };
     });
   }
