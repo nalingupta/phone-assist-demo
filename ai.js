@@ -219,7 +219,7 @@
     hasVoice() { return !!(this.server && this.server.elevenlabs); },
 
     status() {
-      if (this.mode === 'server') return { mode: 'server', label: `Claude ${(this.server.model || '').replace('claude-', '')} connected` + (this.server.elevenlabs ? ' · ElevenLabs voices' : ' · browser voices') };
+      if (this.mode === 'server') return { mode: 'server', label: `Claude ${(this.server.model || '').replace('claude-', '')} connected` + (this.server.elevenlabs ? ' · ElevenLabs voices' : ' · browser voices') + (this.server.build && this.server.build.commit ? ` · build ${this.server.build.commit}` : '') };
       if (this.mode === 'sample') return { mode: 'sample', label: 'Claude connected through this page (no key needed)' };
       if (this.mode === 'direct') return { mode: 'direct', label: `Claude connected: ${this.settings.model || 'claude-opus-5-5'} via your API key` };
       if (global.claude) return { mode: 'none', label: 'Claude not available in this viewer; scripted playback only' };

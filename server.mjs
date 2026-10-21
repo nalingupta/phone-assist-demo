@@ -21,6 +21,7 @@ const VOICES = {
   agent: process.env.ELEVENLABS_VOICE_AGENT || '21m00Tcm4TlvDq8ikWAM'      // Rachel
 };
 const TTS_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
+const BUILD = { commit: String(process.env.RENDER_GIT_COMMIT || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT || '').slice(0, 7) || 'local', started: new Date().toISOString() };
 
 const anthropic = ANTHROPIC_KEY ? new Anthropic({ apiKey: ANTHROPIC_KEY }) : null;
 const ttsCache = new Map();          // text|voice -> Buffer (scripted lines repeat)
@@ -110,7 +111,7 @@ function serveStatic(req, res) {
 const server = http.createServer(async (req, res) => {
   try {
     const { pathname } = new URL(req.url, 'http://x');
-    if (pathname === '/api/config' && req.method === 'GET') return send(res, 200, { claude: !!anthropic, model: anthropic ? MODEL : null, elevenlabs: !!ELEVEN_KEY });
+    if (pathname === '/api/config' && req.method === 'GET') return send(res, 200, { claude: !!anthropic, model: anthropic ? MODEL : null, elevenlabs: !!ELEVEN_KEY, build: BUILD });
     if (pathname === '/api/claude' && req.method === 'POST') return await handleClaude(req, res);
     if (pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res);
     if (pathname.startsWith('/api/')) return send(res, 404, { error: 'Unknown API route' });
