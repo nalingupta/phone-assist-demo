@@ -7,9 +7,9 @@ services:
     startCommand: npm start
     healthCheckPath: /api/config
     envVars:
-      - key: ANTHROPIC_API_KEY
+      - key: OPENAI_API_KEY
         sync: false
       - key: ELEVENLABS_API_KEY
         sync: false
-      - key: CLAUDE_MODEL
-        value: claude-haiku-5-5
+      - key: OPENAI_MODEL
+        value: gpt-5.6-luna

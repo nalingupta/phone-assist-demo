@@ -1,20 +1,38 @@
 /* Phone Assist demo server.
    Serves the static demo and keeps the API keys on the server side:
-     POST /api/claude   -> Claude Haiku 5.5 with structured JSON output
-     POST /api/tts      -> ElevenLabs text to speech (audio/mpeg)
-     GET  /api/config   -> which services are configured
-   Environment: ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, optional CLAUDE_MODEL,
-   ELEVENLABS_VOICE_CALLER, ELEVENLABS_VOICE_AGENT, PORT. */
+     POST /api/llm    -> GPT-5.6 Luna with structured JSON output
+     POST /api/tts    -> ElevenLabs text to speech (audio/mpeg)
+     GET  /api/config -> which services are configured
+   Environment: OPENAI_API_KEY, ELEVENLABS_API_KEY, optional OPENAI_MODEL,
+   OPENAI_EFFORT, ELEVENLABS_VOICE_CALLER, ELEVENLABS_VOICE_AGENT, PORT.
+   A local .env file is loaded when present and never overrides real env vars. */
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Anthropic from '@anthropic-ai/sdk';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+
+function loadEnvFile() {
+  let text;
+  try { text = fs.readFileSync(path.join(ROOT, '.env'), 'utf8'); } catch (e) { return; }
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let val = trimmed.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+    if (!process.env[key]) process.env[key] = val;
+  }
+}
+loadEnvFile();
+
 const PORT = Number(process.env.PORT || 8080);
-const MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-5-5';
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
+const MODEL = process.env.OPENAI_MODEL || 'gpt-5.6-luna';
+const DEFAULT_EFFORT = process.env.OPENAI_EFFORT || 'low';
+const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY || '';
 const VOICES = {
   caller: process.env.ELEVENLABS_VOICE_CALLER || 'EXAVITQu4vr4xnSDxMaL',   // Sarah
@@ -22,8 +40,8 @@ const VOICES = {
 };
 const TTS_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
 const BUILD = { commit: String(process.env.RENDER_GIT_COMMIT || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT || '').slice(0, 7) || 'local', started: new Date().toISOString() };
+const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 
-const anthropic = ANTHROPIC_KEY ? new Anthropic({ apiKey: ANTHROPIC_KEY }) : null;
 const ttsCache = new Map();          // text|voice -> Buffer (scripted lines repeat)
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8' };
@@ -44,28 +62,63 @@ function readJson(req, limit = 1_000_000) {
   });
 }
 
-async function handleClaude(req, res) {
-  if (!anthropic) return send(res, 503, { error: 'Claude is not configured on this server (ANTHROPIC_API_KEY missing).' });
+function outputText(data) {
+  if (data && typeof data.output_text === 'string' && data.output_text.trim()) return data.output_text;
+  const parts = [];
+  for (const item of (data && data.output) || []) {
+    if (item.type !== 'message' || !Array.isArray(item.content)) continue;
+    for (const c of item.content) {
+      if ((c.type === 'output_text' || c.type === 'text') && c.text) parts.push(c.text);
+    }
+  }
+  return parts.join('');
+}
+
+function refused(data) {
+  for (const item of (data && data.output) || []) {
+    if (item.type !== 'message' || !Array.isArray(item.content)) continue;
+    if (item.content.some((c) => c.type === 'refusal')) return true;
+  }
+  return false;
+}
+
+async function handleLlm(req, res) {
+  if (!OPENAI_KEY) return send(res, 503, { error: 'OpenAI is not configured on this server (OPENAI_API_KEY missing).' });
   const body = await readJson(req);
-  const { system, user, schema, maxTokens } = body;
+  const { system, user, schema, maxTokens, effort } = body;
   if (!system || !user || !schema) return send(res, 400, { error: 'system, user and schema are required' });
+  const chosenEffort = EFFORTS.has(effort) ? effort : (EFFORTS.has(DEFAULT_EFFORT) ? DEFAULT_EFFORT : 'low');
+  const maxOut = Math.min(Math.max(Number(maxTokens) || 8000, 1024), 16000);
   try {
-    const msg = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: Math.min(Number(maxTokens) || 8000, 16000),
-      system,
-      messages: [{ role: 'user', content: user }],
-      output_config: { effort: 'low', format: { type: 'json_schema', schema } }
+    const r = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${OPENAI_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL,
+        instructions: system,
+        input: user,
+        reasoning: { effort: chosenEffort },
+        max_output_tokens: maxOut,
+        text: { format: { type: 'json_schema', name: 'phone_assist', strict: true, schema } }
+      })
     });
-    if (msg.stop_reason === 'refusal') return send(res, 422, { error: 'Claude declined this request.' });
-    const block = msg.content.find((b) => b.type === 'text');
-    if (!block || !block.text) return send(res, 502, { error: 'Claude returned no text.' });
+    const data = await r.json().catch(() => null);
+    if (!r.ok) {
+      const msg = data && data.error && data.error.message ? data.error.message : `OpenAI request failed (${r.status}).`;
+      return send(res, r.status === 401 ? 503 : 502, { error: msg });
+    }
+    if (refused(data)) return send(res, 422, { error: 'OpenAI declined this request.' });
+    if (data && data.status === 'incomplete') {
+      const reason = data.incomplete_details && data.incomplete_details.reason;
+      return send(res, 502, { error: `OpenAI stopped early (${reason || 'incomplete'}).` });
+    }
+    const text = outputText(data);
+    if (!text) return send(res, 502, { error: 'OpenAI returned no text.' });
     let parsed;
-    try { parsed = JSON.parse(block.text); } catch (e) { return send(res, 502, { error: 'Claude returned something that was not JSON.' }); }
-    return send(res, 200, { result: parsed, model: msg.model });
+    try { parsed = JSON.parse(text); } catch (e) { return send(res, 502, { error: 'OpenAI returned something that was not JSON.' }); }
+    return send(res, 200, { result: parsed, model: (data && data.model) || MODEL });
   } catch (e) {
-    const status = e && e.status ? e.status : 502;
-    return send(res, status, { error: (e && e.message) || 'Claude request failed.' });
+    return send(res, 502, { error: (e && e.message) || 'OpenAI request failed.' });
   }
 }
 
@@ -111,8 +164,8 @@ function serveStatic(req, res) {
 const server = http.createServer(async (req, res) => {
   try {
     const { pathname } = new URL(req.url, 'http://x');
-    if (pathname === '/api/config' && req.method === 'GET') return send(res, 200, { claude: !!anthropic, model: anthropic ? MODEL : null, elevenlabs: !!ELEVEN_KEY, build: BUILD });
-    if (pathname === '/api/claude' && req.method === 'POST') return await handleClaude(req, res);
+    if (pathname === '/api/config' && req.method === 'GET') return send(res, 200, { openai: !!OPENAI_KEY, model: OPENAI_KEY ? MODEL : null, elevenlabs: !!ELEVEN_KEY, build: BUILD });
+    if ((pathname === '/api/llm' || pathname === '/api/claude') && req.method === 'POST') return await handleLlm(req, res);
     if (pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res);
     if (pathname.startsWith('/api/')) return send(res, 404, { error: 'Unknown API route' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
@@ -123,5 +176,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Phone Assist demo listening on http://localhost:${PORT}  claude=${anthropic ? MODEL : 'off'} elevenlabs=${ELEVEN_KEY ? 'on' : 'off'}`);
+  console.log(`Phone Assist demo listening on http://localhost:${PORT}  openai=${OPENAI_KEY ? MODEL : 'off'} elevenlabs=${ELEVEN_KEY ? 'on' : 'off'}`);
 });

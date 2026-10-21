@@ -11,7 +11,7 @@
   /* Settings                                                            */
   /* ------------------------------------------------------------------ */
   const SETTINGS_KEY = 'phoneAssistDemo.settings.v2';
-  const DEFAULT_SETTINGS = { apiKey: '', model: 'claude-haiku-5-5', effort: 'low', baseUrl: '', tier: 'quick', audio: true };
+  const DEFAULT_SETTINGS = { apiKey: '', model: 'gpt-5.6-luna', effort: 'low', baseUrl: '', tier: 'quick', audio: true };
   function loadSettings() {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
@@ -59,11 +59,15 @@
   })();
   function useStore() {
     const [s, setS] = useState(Store.get());
-    useEffect(() => Store.subscribe(setS), []);
+    useEffect(() => {
+      const unsub = Store.subscribe(setS);
+      setS(Store.get());
+      return unsub;
+    }, []);
     return s;
   }
 
-  const effectiveEngine = (s) => (AI.available() ? 'ai' : 'script');   // Claude drives the panels whenever it is reachable
+  const effectiveEngine = (s) => (AI.available() ? 'ai' : 'script');   // GPT-5.6 Luna drives the panels whenever it is reachable
   const currentScenario = () => scenarioById(Store.get().scenarioId);
   const elapsed = () => { const s = Store.get(); return s.callStart ? (Date.now() - s.callStart) / 1000 : 0; };
   const fmtClock = (t) => { const s = Math.max(0, Math.round(t || 0)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
@@ -162,7 +166,7 @@
       setSteps(map);
     }
     if (r.tagsAdd) addTags(r.tagsAdd);
-    if (effectiveEngine(Store.get()) !== 'ai') pushCards(r.cards);   // with Claude driving, it decides what the result means
+    if (effectiveEngine(Store.get()) !== 'ai') pushCards(r.cards);   // with the model driving, it decides what the result means
     return r;
   }
 
@@ -251,7 +255,7 @@
     if (s.mode === 'scripted') {
       if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().scriptIndex === 0) playTurn(0, { interrupt: false }); }, 300);
     } else {
-      if (!AI.available()) notify('Claude is not connected on this server, so the panels will not update in live mode.');
+      if (!AI.available()) notify('OpenAI is not connected on this server, so the panels will not update in live mode.');
     }
   }
 
@@ -396,7 +400,7 @@
       pushCards([{ kind: 'say', text: turn.delta.bestReply, source: 'Best reply' }]);
       return;
     }
-    if (!AI.available()) { notify('Connect Claude in Settings to generate a best reply.'); return; }
+    if (!AI.available()) { notify('OpenAI is not connected on this server, so a best reply cannot be generated.'); return; }
     Store.set({ bestBusy: true, aiError: '' });
     try {
       const res = await AI.bestReply(Store.get(), userById(s.userId));
@@ -426,7 +430,7 @@
     }
     const hit = D.CANNED_ANSWERS.find((c) => c.match.test(question));
     if (hit) pushCards([{ kind: 'answer', text: hit.answer, source: hit.source }]);
-    else pushCards([{ kind: 'answer', text: 'In scripted mode I answer from the knowledge base only. Ask about coupons, transfers, early refills, flu shots, identity checks or prior authorization, or connect Claude in Settings for free-form questions.', source: `Q: ${question}` }]);
+    else pushCards([{ kind: 'answer', text: 'In scripted mode I answer from the knowledge base only. Ask about coupons, transfers, early refills, flu shots, identity checks or prior authorization, or connect OpenAI on the local server for free-form questions.', source: `Q: ${question}` }]);
   }
 
   function updateSettings(patch) {
@@ -637,7 +641,7 @@
                 ${b.cards.map((c) => html`<${GuidanceCard} key=${c.id} c=${c} />`)}
               </div>`)
             : html`<div class="gempty">${s.callStatus === 'idle' ? 'Start a call. Only things worth your attention show up here: policy risks, facts the caller needs, offers worth making.' : 'Nothing needs your attention yet.'}</div>`}
-          ${s.aiBusy ? html`<div class="gbusy">Claude is updating the screen…</div>` : ''}
+          ${s.aiBusy ? html`<div class="gbusy">GPT-5.6 Luna is updating the screen…</div>` : ''}
           ${s.aiError ? html`<div class="gerror">${s.aiError}</div>` : ''}
           <div class="gspacer" ref=${spacerRef}></div>
         </div>
@@ -764,7 +768,7 @@
     const runTest = async () => {
       updateSettings(form);
       setTest('Testing…');
-      try { const r = await AI.ping(); setTest(r && r.ok ? 'Connected. Claude answered.' : 'Unexpected answer.'); }
+      try { const r = await AI.ping(); setTest(r && r.ok ? 'Connected. GPT-5.6 Luna answered.' : 'Unexpected answer.'); }
       catch (e) { setTest(`Failed: ${e.message || e}`); }
     };
     return html`
@@ -772,7 +776,7 @@
         <div class="modal" role="dialog" aria-label="Settings">
           <h3>Settings</h3>
           <p class=${'modal-status ' + (AI.available() ? 'ok' : '')}>${AI.status().label}</p>
-          ${AI.mode === 'server' ? html`<p class="modal-help">Claude and the voices run through the demo server; nothing to configure here.</p>` : inArtifact ? html`
+          ${AI.mode === 'server' ? html`<p class="modal-help">GPT-5.6 Luna and ElevenLabs run on this local server. The keys stay in .env, not in the browser.</p>` : inArtifact ? html`
             <p class="modal-help">This page is running inside claude.ai, so Claude is reached through the viewer and no API key is needed. Voice input is not available here; type lines in Live mode, or download the folder to run with the microphone.</p>
             <label class="field"><span>Speed</span>
               <select value=${form.tier} onChange=${f('tier')}>
@@ -780,21 +784,7 @@
                 <option value="default">Default (slower, thinks first)</option>
               </select></label>
           ` : html`
-            <label class="field"><span>Anthropic API key</span><input type="password" value=${form.apiKey} onInput=${f('apiKey')} placeholder="sk-ant-…" autocomplete="off" /></label>
-            <label class="field"><span>Model</span>
-              <select value=${form.model} onChange=${f('model')}>
-                <option value="claude-opus-5-5">claude-opus-5-5 (default)</option>
-                <option value="claude-sonnet-5-5">claude-sonnet-5-5 (faster)</option>
-                <option value="claude-haiku-5-5">claude-haiku-5-5 (fastest)</option>
-              </select></label>
-            <label class="field"><span>Effort</span>
-              <select value=${form.effort} onChange=${f('effort')}>
-                <option value="low">low (fastest, recommended for live calls)</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-              </select></label>
-            <label class="field"><span>API base URL (optional proxy)</span><input type="text" value=${form.baseUrl} onInput=${f('baseUrl')} placeholder="https://api.anthropic.com" /></label>
-            <p class="modal-help">The key is kept in this browser's local storage and sent straight to the Claude API from this page. Fine for a laptop demo; use a proxy URL if you would rather not keep the key in the browser.</p>
+            <p class="modal-help">${AI.server ? 'This server has no OpenAI key yet. Add OPENAI_API_KEY and ELEVENLABS_API_KEY to .env and restart. Scripted playback still works.' : 'No local server is running, so only scripted playback is available. From the project folder, run npm start and open http://localhost:8080.'}</p>
           `}
           <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the scripted call aloud</span></label>
           <p class="modal-help">The panels update automatically after every line. Prompts live in the repository under prompts/ (analysis.md, best_reply.md, ask.md).</p>

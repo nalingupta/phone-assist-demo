@@ -1,9 +1,8 @@
-/* Phone Assist demo: Claude backend.
-   Two ways to reach Claude, picked automatically:
-   1. "sample": the page runs inside a claude.ai artifact viewer and uses the
-      viewer's own Claude access (no API key).
-   2. "direct": the page runs locally and calls the Claude API with the key the
-      user saved in Settings (header anthropic-dangerous-direct-browser-access).
+/* Phone Assist demo: model backend.
+   1. "server": localhost (or a host) calls GPT-5.6 Luna through server.mjs.
+      The browser never holds the OpenAI or ElevenLabs key.
+   2. "sample": the page runs inside a claude.ai artifact viewer and uses the
+      viewer's own Claude access (no API key). That host cannot call OpenAI.
    If neither is available the demo still runs on scripted deltas. */
 (function (global) {
   'use strict';
@@ -170,7 +169,7 @@
 
   /* ---------------- backends ---------------- */
   const AI = {
-    mode: 'none',          // 'server' | 'sample' | 'direct' | 'none'
+    mode: 'none',          // 'server' | 'sample' | 'none'
     sample: null,
     server: null,          // /api/config answer when a demo server is behind this page
     settings: {},
@@ -185,9 +184,8 @@
     },
 
     recompute() {
-      if (this.server && this.server.claude) this.mode = 'server';
+      if (this.server && this.server.openai) this.mode = 'server';
       else if (this.sample) this.mode = 'sample';
-      else if (this.settings.apiKey && !global.claude) this.mode = 'direct';
       else this.mode = 'none';
       this.emit();
     },
@@ -219,11 +217,13 @@
     hasVoice() { return !!(this.server && this.server.elevenlabs); },
 
     status() {
-      if (this.mode === 'server') return { mode: 'server', label: `Claude ${(this.server.model || '').replace('claude-', '')} connected` + (this.server.elevenlabs ? ' · ElevenLabs voices' : ' · browser voices') + (this.server.build && this.server.build.commit ? ` · build ${this.server.build.commit}` : '') };
+      if (this.mode === 'server') {
+        const model = this.server.model === 'gpt-5.6-luna' ? 'GPT-5.6 Luna' : (this.server.model || 'GPT-5.6 Luna');
+        return { mode: 'server', label: `${model} connected` + (this.server.elevenlabs ? ' · ElevenLabs voices' : ' · browser voices') + (this.server.build && this.server.build.commit ? ` · build ${this.server.build.commit}` : '') };
+      }
       if (this.mode === 'sample') return { mode: 'sample', label: 'Claude connected through this page (no key needed)' };
-      if (this.mode === 'direct') return { mode: 'direct', label: `Claude connected: ${this.settings.model || 'claude-opus-5-5'} via your API key` };
       if (global.claude) return { mode: 'none', label: 'Claude not available in this viewer; scripted playback only' };
-      if (this.server) return { mode: 'none', label: 'Server has no Claude key yet; scripted playback only' };
+      if (this.server) return { mode: 'none', label: 'Server has no OpenAI key yet; scripted playback only' };
       return { mode: 'none', label: 'No AI service behind this page; scripted playback only' };
     },
 
@@ -231,7 +231,7 @@
       if (this.mode === 'server') {
         let r;
         try {
-          r = await fetch('api/claude', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ system, user, schema, maxTokens }), signal });
+          r = await fetch('api/llm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ system, user, schema, maxTokens, effort: effort || this.settings.effort || 'low' }), signal });
         } catch (e) { throw new Error('Could not reach the demo server.'); }
         const data = await r.json().catch(() => null);
         if (!r.ok) throw new Error((data && data.error) || `Server error ${r.status}`);
@@ -245,8 +245,7 @@
           throw new Error(sampleErrorText(e));
         }
       }
-      if (this.mode === 'direct') return callDirect(this.settings, { system, user, schema, effort, maxTokens, signal });
-      throw new Error('Claude is not connected on this server.');
+      throw new Error('OpenAI is not connected on this server.');
     },
 
     analyze(state, user) {
@@ -279,47 +278,6 @@
       case 'cancelled': return 'Cancelled.';
       case 'refused': return 'Claude declined this request.';
       default: return (e && e.message) ? e.message : 'Claude request failed.';
-    }
-  }
-
-  async function callDirect(settings, { system, user, schema, effort, maxTokens, signal }) {
-    const model = settings.model || 'claude-opus-5-5';
-    const base = (settings.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
-    const headers = {
-      'content-type': 'application/json',
-      'x-api-key': settings.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    };
-    const body = {
-      model,
-      max_tokens: maxTokens || 8000,
-      system,
-      messages: [{ role: 'user', content: user }],
-      output_config: { effort: effort || settings.effort || 'low', format: { type: 'json_schema', schema } }
-    };
-    if (/opus|sonnet/.test(model)) {
-      body.fallbacks = 'default';
-      headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
-    }
-    let res;
-    try {
-      res = await fetch(`${base}/v1/messages`, { method: 'POST', headers, body: JSON.stringify(body), signal });
-    } catch (e) {
-      throw new Error('Could not reach the Claude API (network or CORS). If you are running from a file, serve the folder over http://localhost instead.');
-    }
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg = data && data.error && data.error.message ? data.error.message : `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
-    if (data.stop_reason === 'refusal') throw new Error('Claude declined this request.');
-    const block = (data.content || []).find((b) => b.type === 'text');
-    if (!block || !block.text) throw new Error('Claude returned no text.');
-    try {
-      return JSON.parse(block.text);
-    } catch (e) {
-      throw new Error('Claude returned something that was not JSON.');
     }
   }
 
