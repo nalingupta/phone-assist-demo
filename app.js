@@ -11,7 +11,7 @@
   /* Settings                                                            */
   /* ------------------------------------------------------------------ */
   const SETTINGS_KEY = 'phoneAssistDemo.settings.v2';
-  const DEFAULT_SETTINGS = { apiKey: '', model: 'claude-opus-5-5', effort: 'low', baseUrl: '', tier: 'quick', autoAnalyze: true, engine: 'script', audio: true };
+  const DEFAULT_SETTINGS = { apiKey: '', model: 'claude-haiku-5-5', effort: 'low', baseUrl: '', tier: 'quick', audio: true };
   function loadSettings() {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
@@ -63,7 +63,7 @@
     return s;
   }
 
-  const effectiveEngine = (s) => (s.mode === 'live' ? 'ai' : s.settings.engine);
+  const effectiveEngine = (s) => (AI.available() ? 'ai' : 'script');   // Claude drives the panels whenever it is reachable
   const currentScenario = () => scenarioById(Store.get().scenarioId);
   const elapsed = () => { const s = Store.get(); return s.callStart ? (Date.now() - s.callStart) / 1000 : 0; };
   const fmtClock = (t) => { const s = Math.max(0, Math.round(t || 0)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
@@ -162,7 +162,7 @@
       setSteps(map);
     }
     if (r.tagsAdd) addTags(r.tagsAdd);
-    pushCards(r.cards);
+    if (effectiveEngine(Store.get()) !== 'ai') pushCards(r.cards);   // with Claude driving, it decides what the result means
     return r;
   }
 
@@ -251,7 +251,7 @@
     if (s.mode === 'scripted') {
       if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().scriptIndex === 0) playTurn(0, { interrupt: false }); }, 300);
     } else {
-      if (!AI.available()) notify('No Claude connection: lines will be transcribed but the panels will not update. Open Settings to connect.');
+      if (!AI.available()) notify('Claude is not connected on this server, so the panels will not update in live mode.');
     }
   }
 
@@ -361,7 +361,7 @@
   function addLiveLine(speaker, text) {
     if (Store.get().callStatus !== 'active') return;
     addLine(speaker, text);
-    if (Store.get().settings.autoAnalyze) scheduleAnalysis();
+    scheduleAnalysis();
   }
 
   function speakAs(speaker) {
@@ -514,7 +514,6 @@
           </div>
           <div class="rail-note">${sc ? html`<b>${user.phone}</b> · ${sc.title}` : 'Pick an incoming number below, or leave it random.'}</div>
           ${s.settings.audio && !TTS.supported ? html`<div class="rail-warn">No speech synthesis here; lines play silently.</div>` : ''}
-          ${s.settings.engine === 'ai' ? html`<div class=${'rail-warn ' + (AI.available() ? 'ok' : '')}>Claude drives the panels for this replay${AI.available() ? '' : ', but it is not connected'}.</div>` : ''}
         ` : html`
           <div class="rail-note">
             ${recognizer.supported
@@ -773,7 +772,7 @@
         <div class="modal" role="dialog" aria-label="Settings">
           <h3>Settings</h3>
           <p class=${'modal-status ' + (AI.available() ? 'ok' : '')}>${AI.status().label}</p>
-          ${inArtifact ? html`
+          ${AI.mode === 'server' ? html`<p class="modal-help">Claude and the voices run through the demo server; nothing to configure here.</p>` : inArtifact ? html`
             <p class="modal-help">This page is running inside claude.ai, so Claude is reached through the viewer and no API key is needed. Voice input is not available here; type lines in Live mode, or download the folder to run with the microphone.</p>
             <label class="field"><span>Speed</span>
               <select value=${form.tier} onChange=${f('tier')}>
@@ -797,13 +796,8 @@
             <label class="field"><span>API base URL (optional proxy)</span><input type="text" value=${form.baseUrl} onInput=${f('baseUrl')} placeholder="https://api.anthropic.com" /></label>
             <p class="modal-help">The key is kept in this browser's local storage and sent straight to the Claude API from this page. Fine for a laptop demo; use a proxy URL if you would rather not keep the key in the browser.</p>
           `}
-          <label class="field check"><input type="checkbox" checked=${form.autoAnalyze} onChange=${f('autoAnalyze')} /><span>Update the panels automatically after every live line</span></label>
-          <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the scripted call aloud (browser speech synthesis)</span></label>
-          <label class="field"><span>Scripted replay: what fills the panels</span>
-            <select value=${form.engine} onChange=${f('engine')}>
-              <option value="script">The script's own deltas (deterministic, no AI)</option>
-              <option value="ai">Claude, from the transcript (for testing the prompts)</option>
-            </select></label>
+          <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the scripted call aloud</span></label>
+          <p class="modal-help">The panels update automatically after every line. Prompts live in the repository under prompts/ (analysis.md, best_reply.md, ask.md).</p>
           <div class="modal-actions">
             <button class="btn-dark" onClick=${save}>Save</button>
             <button class="btn-plain" onClick=${runTest}>Test connection</button>
@@ -846,7 +840,7 @@
   /* ------------------------------------------------------------------ */
   /* Boot                                                                 */
   /* ------------------------------------------------------------------ */
-  AI.onChange((st) => Store.set({ aiStatus: st }));
+  AI.onChange((st) => { TTS.useServer(AI.hasVoice()); Store.set({ aiStatus: st }); });
   AI.init(Store.get().settings);
   render(html`<${App} />`, document.getElementById('app'));
 

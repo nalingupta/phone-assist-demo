@@ -1,0 +1,14 @@
+{
+  "name": "phone-assist-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mock demo of an AI phone assist screen for a pharmacy support desk",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  }
+}

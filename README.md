@@ -39,13 +39,30 @@ Live Guidance shows short contextual notes when there is something to know or ke
 
 In both modes, click a tool chip to open its input form, edit the pre-filled values and press **Execute**. The mock API answers and, where it makes sense, pushes a Recommendation or Tell card into Live Guidance. **Get Best Reply** proposes the next thing to say; the ask box answers a free-text question from the agent.
 
-## Connecting Claude
+## Hosting it with Claude and ElevenLabs
 
-Open **Settings** (gear icon, top right) and paste an Anthropic API key. The key stays in this browser's local storage and the page calls the Claude API directly, which is fine for a laptop demo. The default model is `claude-opus-5-5` at low effort; `claude-sonnet-5-5` or `claude-haiku-5-5` answer faster. If you would rather keep the key off the browser, run a small proxy and put its URL in **API base URL**.
+The browser never holds a key. A small Node server (`server.mjs`) serves the page and keeps the keys:
 
-Requests use structured outputs (`output_config.format`) so the panels always receive valid JSON, and the server-side refusal fallback (`fallbacks: "default"`) on Opus and Sonnet.
+- `POST /api/claude` runs the analysis, best reply and ask prompts on Claude Haiku 5.5 with structured JSON output.
+- `POST /api/tts` turns scripted lines into speech with ElevenLabs (falls back to the browser's own voices when no key is set).
+- `GET /api/config` tells the page which services are configured.
 
-When the page is published as a claude.ai artifact, it reaches Claude through the viewer's own account instead, so no key is needed there. Voice input is not available inside the artifact; use typed lines.
+Deploy it anywhere that runs Node 20+ from a GitHub repo (Railway, Render, Fly). Set these environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Claude access (required for live analysis) |
+| `ELEVENLABS_API_KEY` | ElevenLabs voices for the scripted call (optional) |
+| `CLAUDE_MODEL` | defaults to `claude-haiku-5-5` |
+| `ELEVENLABS_VOICE_CALLER`, `ELEVENLABS_VOICE_AGENT` | voice ids, default Sarah and Rachel |
+
+The start command is `npm start`. Every push to `main` redeploys. Locally: `ANTHROPIC_API_KEY=... ELEVENLABS_API_KEY=... npm start` and open http://localhost:8080.
+
+Whenever Claude is reachable, it drives every panel from the transcript, in scripted replays as well as live calls. Without it, scripted calls still play from their built-in deltas, so the GitHub Pages copy keeps working as a no-AI preview. Live transcription uses the speech recognition built into Chrome and Edge.
+
+## Prompts
+
+The prompts are plain Markdown in `prompts/`: `analysis.md` (workflow steps, tags, guidance, tools), `best_reply.md` and `ask.md`. Placeholders `{{groups}}`, `{{tags}}`, `{{tools}}`, `{{kb}}` and `{{customer}}` are filled from `data.js` at runtime. Edit the files and reload; no build step.
 
 ## Files
 
@@ -54,7 +71,9 @@ When the page is published as a claude.ai artifact, it reaches Claude through th
 - `artifact.html`: the same page with the CSS and JS inlined, in the form the claude.ai Artifact tool wraps. Regenerate it with `./build-artifact.sh` after editing the sources.
 - `app.js`: the screen (Preact + htm from a CDN, no build).
 - `data.js`: mock customers, knowledge base, SOP groups, tags, tools with canned outputs, the scripted call.
-- `ai.js`: prompts, JSON schemas and the two Claude backends.
+- `ai.js`: JSON schemas, prompt loading and the Claude backends (server, artifact, direct).
+- `server.mjs`, `package.json`: the key-holding server for hosting.
+- `prompts/`: editable prompt templates.
 - `voice.js`: Web Speech API wrapper with auto-restart (speech to text).
 - `tts.js`: speech synthesis wrapper that reads scripted lines aloud (text to speech).
 - `styles.css`: the Cignara playground look.

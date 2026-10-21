@@ -60,7 +60,44 @@
     });
   }
 
-  function cancel() { if (supported) { try { synth.cancel(); } catch (e) { /* ignore */ } } }
+  /* ElevenLabs voices via the demo server (POST api/tts), falling back to the browser. */
+  let currentAudio = null;
+  let serverVoice = false;
+  const audioCache = new Map();
+  function useServer(on) { serverVoice = !!on; }
 
-  global.TTS = { supported, speak, cancel, voices: () => voices };
+  function speakServer(text, role) {
+    return new Promise(async (resolve) => {
+      let url = audioCache.get(`${role}|${text}`);
+      try {
+        if (!url) {
+          const r = await fetch('api/tts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, voice: role }) });
+          if (!r.ok) return resolve(speak(text, role, true));
+          url = URL.createObjectURL(await r.blob());
+          audioCache.set(`${role}|${text}`, url);
+        }
+      } catch (e) { return resolve(speak(text, role, true)); }
+      const a = new Audio(url);
+      currentAudio = a;
+      let done = false;
+      const finish = (ok) => { if (done) return; done = true; if (currentAudio === a) currentAudio = null; resolve(ok); };
+      a.onended = () => finish(true);
+      a.onerror = () => finish(false);
+      a.play().catch(() => finish(false));
+      setTimeout(() => finish(true), Math.min(60000, 5000 + text.length * 120));
+    });
+  }
+
+  const speakBrowser = speak;
+  function speakAny(text, role, forceBrowser) {
+    if (serverVoice && !forceBrowser) return speakServer(text, role);
+    return speakBrowser(text, role);
+  }
+
+  function cancel() {
+    if (currentAudio) { try { currentAudio.pause(); } catch (e) { /* ignore */ } currentAudio = null; }
+    if (supported) { try { synth.cancel(); } catch (e) { /* ignore */ } }
+  }
+
+  global.TTS = { get supported() { return supported || serverVoice; }, speak: speakAny, cancel, useServer, voices: () => voices };
 })(window);

@@ -110,82 +110,69 @@
     return `Active groups: ${active || 'none'}. Step statuses: ${steps || 'none'}. Tags: ${state.tags.join(', ') || 'none'}.`;
   }
 
-  function analysisSystem(user) {
+  const TEMPLATES = { analysis: null, best_reply: null, ask: null };   // filled from prompts/*.md when reachable
+
+  function fill(template, user) {
     const c = catalogText();
-    return `You are the real-time Phone Assist analyst for a Walgreens pharmacy customer-support desk (a product demo with mock data). A human AGENT is on a live phone call with a CALLER. You read the transcript and keep the agent's screen current. You never speak to the caller.
+    return template
+      .replace(/\{\{groups\}\}/g, c.groups)
+      .replace(/\{\{tags\}\}/g, D.TAGS.join(', '))
+      .replace(/\{\{tools\}\}/g, c.tools)
+      .replace(/\{\{kb\}\}/g, c.kb)
+      .replace(/\{\{customer\}\}/g, customerText(user));
+  }
 
-# Output
-Return one JSON object with exactly these keys:
-- activeGroups: ids of the catalog workflow groups that apply to this call so far. The screen starts blank: before the caller has said what they need, return []. At the caller's first real request return "verification" plus the group for that topic. Add a group the moment a new topic comes up. Add "wrapup" once the main request is resolved. Never remove a group.
-- customGroups: when the caller's topic has no catalog group, invent one: a short id (lowercase, underscores), a two or three word title, and 2 to 4 concrete steps in SOP order, each with its status. Keep it [] otherwise. Keep a custom group's id and steps stable once created.
-- steps: one {id, status} for EVERY step of every active catalog group. status is "done", "pending" or "missed".
-- tags: at most 4 short labels that change how the agent should handle this call or what to document: a verified identity, a plan type or coverage fact, a preference on record (prefers email, hard of hearing), a state of the conversation (price-sensitive, escalation needed, consent given). Prefer the vocabulary; a custom tag of two or three words is fine when it fits better. No tags that merely restate the topic.
-- guidance: 0, 1 or at most 2 cards for THIS moment, each {kind, text, bullets, source}. One event (the latest utterance or tool result) gets at most ONE card: put several points into bullets (each under 15 words) under a one-line text. An empty array is the normal answer when nothing new deserves attention.
-- tools: 3 to 6 tool ids the agent is most likely to need next, most useful first.
-- suggestedTool: the one tool id the agent should run right now because the situation calls for it (a verification step is due, a claim needs checking, a slot needs booking), or "" when none.
-
-# Step status rules
-- "done" only AFTER the agent actually performed the step: a TOOL line shows it ran, or the agent's own words show it was said. A tool run completes its matching step (Send OTP completes "Send one-time passcode", Check Insurance completes "Check refill and claim status", Page Pharmacist completes the warm-transfer, Log Summary completes the summary, and so on). Never mark a step done because the caller supplied information the agent has not acted on yet: the caller giving a date of birth does not complete "Confirm name and date of birth" until the agent confirms or verifies it. A caller's explicit confirmation (the store, the time, a choice) does complete a "confirm" step.
-- "missed" when the agent has moved on to a later step in the same group, or to a later group, without doing this one. Example: rerunning a claim before reading the rejection reason back to the caller. If the agent does it later, it becomes "done".
-- otherwise "pending".
-- Activate a group the moment its trigger appears and keep it active for the rest of the call. Never deactivate a group. The screen shows only active groups, so the workflow is built up from the conversation rather than shown in advance.
-
-# Guidance cards: contextual, crisp, not every turn
-The agent is on the phone and must not spend time reading. A card appears when there is something the agent should know or keep in mind for the next thing they say or do; when there is nothing new, return []. Do not restate what a trained agent would do anyway (greeting, asking for date of birth, thanking). Kinds:
-- info: a fact from the customer record or the knowledge base that matters right now (a preference, a plan rule, a rejection code's meaning, a timeline). For policy, source is "KB · <document title>".
-- caution: a compliance or policy risk (prescription details before verification, a step skipped, a promise the policy does not allow, a clinical question that must go to the pharmacist).
-- recommendation: the next best action or an offer worth making, grounded in the record or a tool output; source names where it comes from.
-- tell: a result the agent must relay, with the numbers (a copay, a ready time, a confirmation number, a date).
-- say: a short suggested phrasing for a moment that is delicate or easy to get wrong (a pushback, a refusal, a correction); one sentence, never a routine line.
-- do: an action with a detail that matters (run the 90-day claim, not 30; confirm the channel before sending).
-- ask: a question that is required but easy to forget.
-Timing: the card must land BEFORE the agent responds, so it is triggered by what the caller just said or what a tool just returned; a policy reminder the agent needs for the next sentence is exactly what belongs here.
-Rules: text under 18 words, at most 3 bullets of under 12 words each; usually 0 or 1 card, never more than 2. Never repeat a card already shown unless the situation changed. source is "" when nothing backs the card. Never invent policy, prices or eligibility; use only the knowledge base, the customer record and tool outputs.
+  const DEFAULT_TEMPLATES = {
+    analysis: `You are the real-time Phone Assist analyst for a Walgreens pharmacy customer-support desk (a product demo with mock data). A human AGENT is on a live phone call with a CALLER. You read the transcript and keep the agent's screen current. Return one JSON object with keys activeGroups, customGroups, steps, tags, guidance, tools, suggestedTool. The screen starts blank; groups appear from the conversation; a step is done only after the agent performed it; guidance is at most one short card per event and usually none.
 
 # Workflow groups and steps
-${c.groups}
+{{groups}}
 
 # Tag vocabulary
-${D.TAGS.join(', ')}
+{{tags}}
 
-# Tools the agent can run from the screen
-${c.tools}
-
-# Knowledge base
-${c.kb}
-
-# Customer record (already looked up for this caller)
-${customerText(user)}`;
-  }
-
-  function replySystem(user) {
-    const c = catalogText();
-    return `You are the Phone Assist copilot for a Walgreens pharmacy support AGENT who is on a live call with a CALLER (a product demo with mock data). Write the single best next thing for the AGENT to say right now, responding to the caller's latest message and moving the call forward: 1 to 3 sentences of natural spoken English in the agent's voice, consistent with the knowledge base, the customer record and any tool outputs in the transcript. Never invent prices, eligibility or policy. If identity is not verified yet, verify first. If the caller asked a clinical question, hand off to the pharmacist.
-Return one JSON object {reply, why}; why is under 20 words.
+# Tools
+{{tools}}
 
 # Knowledge base
-${c.kb}
+{{kb}}
 
 # Customer record
-${customerText(user)}`;
-  }
-
-  function askSystem(user) {
-    const c = catalogText();
-    return `You are the Phone Assist copilot for a Walgreens pharmacy support AGENT (a product demo with mock data). The agent typed a question for you; the caller cannot see it. Answer the agent in under 60 words using the knowledge base, the customer record and the call so far. When policy is involved, set source to "KB · <document title>"; otherwise "".
-Return one JSON object {answer, source}.
+{{customer}}`,
+    best_reply: `You are the Phone Assist copilot for a pharmacy support AGENT on a live call. Write the single best next thing for the AGENT to say: 1 to 3 sentences, consistent with the knowledge base and customer record. Return JSON {reply, why}.
 
 # Knowledge base
-${c.kb}
+{{kb}}
 
 # Customer record
-${customerText(user)}`;
+{{customer}}`,
+    ask: `You are the Phone Assist copilot for a pharmacy support AGENT. Answer the agent's question in under 60 words from the knowledge base, the customer record and the call. Return JSON {answer, source}.
+
+# Knowledge base
+{{kb}}
+
+# Customer record
+{{customer}}`
+  };
+
+  async function loadTemplates() {
+    await Promise.all(Object.keys(TEMPLATES).map(async (name) => {
+      try {
+        const r = await fetch(`prompts/${name}.md`, { cache: 'no-cache' });
+        if (r.ok) { const t = await r.text(); if (t.trim()) TEMPLATES[name] = t; }
+      } catch (e) { /* file:// or offline: keep the embedded default */ }
+    }));
   }
+
+  const analysisSystem = (user) => fill(TEMPLATES.analysis || DEFAULT_TEMPLATES.analysis, user);
+  const replySystem = (user) => fill(TEMPLATES.best_reply || DEFAULT_TEMPLATES.best_reply, user);
+  const askSystem = (user) => fill(TEMPLATES.ask || DEFAULT_TEMPLATES.ask, user);
 
   /* ---------------- backends ---------------- */
   const AI = {
-    mode: 'none',          // 'sample' | 'direct' | 'none'
+    mode: 'none',          // 'server' | 'sample' | 'direct' | 'none'
     sample: null,
+    server: null,          // /api/config answer when a demo server is behind this page
     settings: {},
     listeners: new Set(),
 
@@ -198,7 +185,8 @@ ${customerText(user)}`;
     },
 
     recompute() {
-      if (this.sample) this.mode = 'sample';
+      if (this.server && this.server.claude) this.mode = 'server';
+      else if (this.sample) this.mode = 'sample';
       else if (this.settings.apiKey && !global.claude) this.mode = 'direct';
       else this.mode = 'none';
       this.emit();
@@ -207,6 +195,14 @@ ${customerText(user)}`;
     async init(settings) {
       this.settings = settings || {};
       this.recompute();
+      loadTemplates();
+      if (!global.claude && /^https?:/.test(location.protocol)) {
+        try {
+          const r = await fetch('api/config', { cache: 'no-store' });
+          if (r.ok) { const cfg = await r.json(); if (cfg && typeof cfg === 'object') this.server = cfg; }
+        } catch (e) { this.server = null; }
+        this.recompute();
+      }
       if (global.claude && typeof global.claude.use === 'function') {
         try {
           const s = await global.claude.use('sample');
@@ -220,14 +216,27 @@ ${customerText(user)}`;
 
     available() { return this.mode !== 'none'; },
 
+    hasVoice() { return !!(this.server && this.server.elevenlabs); },
+
     status() {
+      if (this.mode === 'server') return { mode: 'server', label: `Claude ${(this.server.model || '').replace('claude-', '')} connected` + (this.server.elevenlabs ? ' · ElevenLabs voices' : ' · browser voices') };
       if (this.mode === 'sample') return { mode: 'sample', label: 'Claude connected through this page (no key needed)' };
       if (this.mode === 'direct') return { mode: 'direct', label: `Claude connected: ${this.settings.model || 'claude-opus-5-5'} via your API key` };
-      if (global.claude) return { mode: 'none', label: 'Claude not available in this viewer; scripted deltas only' };
-      return { mode: 'none', label: 'No API key saved: scripted deltas only. Open Settings to connect Claude.' };
+      if (global.claude) return { mode: 'none', label: 'Claude not available in this viewer; scripted playback only' };
+      if (this.server) return { mode: 'none', label: 'Server has no Claude key yet; scripted playback only' };
+      return { mode: 'none', label: 'No AI service behind this page; scripted playback only' };
     },
 
     async json({ system, user, schema, tier, effort, maxTokens, signal }) {
+      if (this.mode === 'server') {
+        let r;
+        try {
+          r = await fetch('api/claude', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ system, user, schema, maxTokens }), signal });
+        } catch (e) { throw new Error('Could not reach the demo server.'); }
+        const data = await r.json().catch(() => null);
+        if (!r.ok) throw new Error((data && data.error) || `Server error ${r.status}`);
+        return data.result;
+      }
       if (this.mode === 'sample') {
         const prompt = `${system}\n\n---\n\n${user}\n\nReply with only one JSON object that matches this JSON Schema, no prose and no code fence:\n${JSON.stringify(schema)}`;
         try {
@@ -237,7 +246,7 @@ ${customerText(user)}`;
         }
       }
       if (this.mode === 'direct') return callDirect(this.settings, { system, user, schema, effort, maxTokens, signal });
-      throw new Error('Claude is not connected. Open Settings to add an API key.');
+      throw new Error('Claude is not connected on this server.');
     },
 
     analyze(state, user) {
