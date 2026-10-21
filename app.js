@@ -37,7 +37,8 @@
   function freshCall() {
     return {
       callStatus: 'idle', callStart: null, transcript: [], interim: '',
-      groups: D.SOP.map((g) => ({ id: g.id, title: g.title, active: !!g.always, added: false, steps: g.steps.map((s) => ({ id: s.id, label: s.label, status: 'pending' })) })),
+      groups: D.SOP.map((g) => ({ id: g.id, title: g.title, active: false, steps: g.steps.map((s) => ({ id: s.id, label: s.label, status: 'pending' })) })),
+      unseenGuidance: 0,
       tags: [], guidance: [], batch: 0, tools: D.DEFAULT_TOOLS.slice(),
       selectedTool: null, toolInputs: {}, toolBusy: false, toolResult: null, toolRuns: [], suggestedTool: null,
       scenarioId: null, scriptIndex: 0, autoplay: false, listening: null, speaking: null, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
@@ -46,7 +47,7 @@
 
   const Store = (() => {
     let state = Object.assign(freshCall(), {
-      userId: pickRandom(D.USERS).id, mode: 'scripted', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
+      userId: pickRandom(D.USERS).id, incoming: 'random', mode: 'scripted', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
       aiStatus: AI.status(), notice: '', voiceError: ''
     });
     const subs = new Set();
@@ -88,7 +89,7 @@
     Store.set((s) => {
       const batch = s.batch + 1;
       const fresh = cards.map((c) => ({ id: nextId(), batch, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()) : [], source: c.source || '' }));
-      return { batch, guidance: s.guidance.concat(fresh).slice(-60) };
+      return { batch, guidance: s.guidance.concat(fresh).slice(-60), unseenGuidance: s.tab === 'guidance' ? 0 : s.unseenGuidance + fresh.length };
     });
   }
 
@@ -104,10 +105,7 @@
 
   function activateGroups(ids) {
     if (!ids || !ids.length) return;
-    Store.set((s) => {
-      const midCall = s.transcript.length > 3;
-      return { groups: s.groups.map((g) => (ids.includes(g.id) && !g.active ? { ...g, active: true, added: midCall, changed: Date.now() } : g)) };
-    });
+    Store.set((s) => ({ groups: s.groups.map((g) => (ids.includes(g.id) && !g.active ? { ...g, active: true, changed: Date.now() } : g)) }));
   }
 
   function addTags(add, remove) {
@@ -170,8 +168,24 @@
 
   function applyAnalysis(res) {
     if (!res || typeof res !== 'object') throw new Error('Empty analysis');
-    const always = D.SOP.filter((g) => g.always).map((g) => g.id);
-    activateGroups((res.activeGroups || []).concat(always));
+    activateGroups(res.activeGroups || []);
+    if (Array.isArray(res.customGroups) && res.customGroups.length) {
+      Store.set((s) => {
+        let groups = s.groups;
+        res.customGroups.forEach((cg) => {
+          if (!cg || !cg.id || !cg.title || !Array.isArray(cg.steps) || !cg.steps.length) return;
+          const id = String(cg.id).toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
+          const steps = cg.steps.filter((st) => st && st.id && st.label).slice(0, 6).map((st) => ({ id: `${id}.${String(st.id)}`, label: String(st.label).slice(0, 80), status: ['done', 'pending', 'missed'].includes(st.status) ? st.status : 'pending' }));
+          const existing = groups.find((g) => g.id === id);
+          if (existing) {
+            groups = groups.map((g) => (g.id === id ? { ...g, active: true, steps: g.steps.map((old) => { const n = steps.find((x) => x.id === old.id); return n && n.status !== old.status ? { ...old, status: n.status, changed: Date.now() } : old; }).concat(steps.filter((n) => !g.steps.some((old) => old.id === n.id))) } : g));
+          } else {
+            groups = groups.concat([{ id, title: String(cg.title).slice(0, 40), active: true, custom: true, changed: Date.now(), steps }]);
+          }
+        });
+        return { groups };
+      });
+    }
     const map = {};
     (res.steps || []).forEach((st) => { if (st && st.id && ['done', 'pending', 'missed'].includes(st.status)) map[st.id] = st.status; });
     setSteps(map);
@@ -223,20 +237,20 @@
     const s = Store.get();
     let scenarioId = null;
     let userId;
+    const chosen = opts.userId || (s.incoming !== 'random' ? s.incoming : null);
     if (s.mode === 'scripted') {
-      const sc = (opts.scenarioId && scenarioById(opts.scenarioId)) || pickRandom(D.SCENARIOS, lastScenarioId);
+      const sc = (opts.scenarioId && scenarioById(opts.scenarioId)) || (chosen && D.SCENARIOS.find((x) => x.userId === chosen)) || pickRandom(D.SCENARIOS, lastScenarioId);
       scenarioId = sc.id;
       userId = sc.userId;
       lastScenarioId = sc.id;
     } else {
-      userId = (opts.userId && userById(opts.userId).id === opts.userId) ? opts.userId : pickRandom(D.USERS, lastUserId).id;
+      userId = (chosen && userById(chosen).id === chosen) ? chosen : pickRandom(D.USERS, lastUserId).id;
       lastUserId = userId;
     }
-    Store.set(Object.assign(freshCall(), { userId, scenarioId, callStatus: 'active', callStart: Date.now(), tab: 'guidance', aiStatus: AI.status() }));
+    Store.set(Object.assign(freshCall(), { userId, scenarioId, callStatus: 'active', callStart: Date.now(), tab: 'customer', aiStatus: AI.status() }));
     if (s.mode === 'scripted') {
       if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().scriptIndex === 0) playTurn(0, { interrupt: false }); }, 300);
     } else {
-      suggestTool('verify_identity');
       if (!AI.available()) notify('No Claude connection: lines will be transcribed but the panels will not update. Open Settings to connect.');
     }
   }
@@ -498,7 +512,7 @@
             <button class=${'rail-small ' + (s.settings.audio ? '' : 'off')} title=${TTS.supported ? 'Read the scripted lines aloud' : 'Speech synthesis is not available in this browser'} onClick=${() => updateSettings({ audio: !s.settings.audio })}>${s.settings.audio ? '🔊 Audio on' : '🔇 Audio off'}</button>
             <span class="rail-note center">${sc ? `Turn ${Math.min(s.scriptIndex, total)} of ${total}` : 'Random scenario'}</span>
           </div>
-          <div class="rail-note">${sc ? html`<b>${user.name}</b> · ${sc.title}` : 'Start call picks one of three callers and situations at random.'}</div>
+          <div class="rail-note">${sc ? html`<b>${user.phone}</b> · ${sc.title}` : 'Pick an incoming number below, or leave it random.'}</div>
           ${s.settings.audio && !TTS.supported ? html`<div class="rail-warn">No speech synthesis here; lines play silently.</div>` : ''}
           ${s.settings.engine === 'ai' ? html`<div class=${'rail-warn ' + (AI.available() ? 'ok' : '')}>Claude drives the panels for this replay${AI.available() ? '' : ', but it is not connected'}.</div>` : ''}
         ` : html`
@@ -507,7 +521,7 @@
               ? (s.listening ? html`<span class="rec">● Listening.</span> Speak naturally; each pause becomes a line.` : 'Pick who you are speaking as, then talk. Click again to stop.')
               : 'Voice input needs Chrome or Edge. Type lines below.'}
           </div>
-          <div class="rail-note">${active || s.callStatus === 'ended' ? html`Caller on record: <b>${user.name}</b> (picked at random)` : 'Start call picks a caller record at random.'}</div>
+          <div class="rail-note">${active || s.callStatus === 'ended' ? html`Incoming number <b>${user.phone}</b> matched to a record; see Customer 360.` : 'Pick an incoming number below, or leave it random.'}</div>
           <textarea id="live-draft" class="rail-text" rows="2" placeholder="Or type a line here…" value=${draft} onInput=${(e) => setDraft(e.target.value)}
             onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(e.altKey ? 'agent' : 'caller'); } }}></textarea>
           <div class="rail-row">
@@ -517,6 +531,13 @@
           <div class="rail-hint">Enter sends as caller, Alt+Enter as agent.</div>
         `}
 
+        <label class="rail-select" title="Which phone number the simulated call comes from">
+          <span>Incoming number</span>
+          <select value=${s.incoming} disabled=${active} onChange=${(e) => Store.set({ incoming: e.target.value })}>
+            <option value="random">Random</option>
+            ${D.USERS.map((u) => html`<option key=${u.id} value=${u.id}>${u.phone}</option>`)}
+          </select>
+        </label>
         <div class="rail-row">
           <button class="rail-btn ghost" disabled=${!active} onClick=${endCall}>End call</button>
           <button class="rail-btn ghost" disabled=${s.callStatus === 'idle' && !s.transcript.length} onClick=${resetAll}>Reset</button>
@@ -537,9 +558,10 @@
       <div class="wf">
         <h2 class="panel-title">Workflow Steps</h2>
         <div class="wf-panel">
+          ${groups.length ? '' : html`<div class="wf-empty">${s.callStatus === 'idle' ? 'Steps appear once a call starts and the caller says what they need.' : 'Listening for what the caller needs…'}</div>`}
           ${groups.map((g) => html`
-            <div key=${g.id + ':' + (g.changed || 0)} class=${'wf-group ' + (g.added ? 'added' : '') + (g.changed ? ' pop' : '')}>
-              <div class="wf-group-title">${g.title}${g.added ? html`<span class="wf-badge">added mid-call</span>` : ''}</div>
+            <div key=${g.id + ':' + (g.changed || 0)} class=${'wf-group' + (g.changed ? ' pop' : '')}>
+              <div class="wf-group-title">${g.title}</div>
               ${g.steps.map((st) => html`
                 <div key=${st.id + ':' + (st.changed || 0)} class=${'wf-step ' + st.status + (st.changed ? ' pop' : '')}>
                   <${StepIcon} status=${st.status} />
@@ -563,8 +585,8 @@
   }
 
   function Tabs({ s }) {
-    const tab = (id, label) => html`<button class=${'tab ' + (s.tab === id ? 'on' : '')} onClick=${() => Store.set({ tab: id })}>${label}</button>`;
-    return html`<div class="tabs">${tab('guidance', 'Live Guidance')}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}
+    const tab = (id, label, badge) => html`<button class=${'tab ' + (s.tab === id ? 'on' : '')} onClick=${() => Store.set({ tab: id, unseenGuidance: id === 'guidance' ? 0 : s.unseenGuidance })}>${label}${badge ? html`<span class="tab-badge">${badge}</span>` : ''}</button>`;
+    return html`<div class="tabs">${tab('guidance', 'Live Guidance', s.tab !== 'guidance' && s.unseenGuidance ? s.unseenGuidance : 0)}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}
       ${s.tab === 'guidance' && s.guidance.length ? html`<button class="link tabs-action" onClick=${() => Store.set({ guidance: [] })}>Clear guidance</button>` : ''}</div>`;
   }
 
@@ -670,6 +692,7 @@
     const kv = (rows) => html`<dl class="kv">${rows.map(([k, v]) => html`<div key=${k}><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>`;
     return html`
       <div class="c360">
+        ${s.callStatus !== 'idle' ? html`<div class="incoming wide">☏ Incoming call from <b>${u.phone}</b> · matched to <b>${u.name}</b>${s.callStatus === 'ended' ? ' · call ended' : ''}</div>` : ''}
         <section>
           <h3>Profile</h3>
           ${kv([['Name', u.name], ['Date of birth', u.dob], ['Phone', u.phone], ['Email', u.email], ['Preferred contact', u.preferredContact], ['Language', u.language]])}

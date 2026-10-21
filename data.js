@@ -126,7 +126,7 @@
   /* SOP workflow catalog                                                 */
   /* ------------------------------------------------------------------ */
   const SOP = [
-    { id: 'verification', title: 'Verification', always: true, when: 'Every call, before any prescription detail is discussed.',
+    { id: 'verification', title: 'Verification', when: 'As soon as the caller says what they need, before any prescription detail is discussed.',
       steps: [
         { id: 'v1', label: 'Confirm name and date of birth' },
         { id: 'v2', label: 'Send one-time passcode (SMS)' },
@@ -162,7 +162,7 @@
         { id: 'e1', label: 'Tell caller a pharmacist will join' },
         { id: 'e2', label: 'Warm-transfer to pharmacist' }
       ] },
-    { id: 'wrapup', title: 'Wrap-up', always: true, when: 'Every call, before hanging up.',
+    { id: 'wrapup', title: 'Wrap-up', when: 'Once the main request is resolved, before hanging up.',
       steps: [
         { id: 'w1', label: 'Confirm pickup store and time' },
         { id: 'w2', label: 'Send confirmation (text or email)' },
@@ -172,7 +172,8 @@
 
   const TAGS = [
     'Identity verified', 'Consent given', 'Insurance rejection', 'Price-sensitive', 'Flu shot request',
-    'Transfer request', 'Escalation needed', 'Sensitive topic', 'Policy risk', 'Controlled substance', 'Caller frustrated'
+    'Transfer request', 'Escalation needed', 'Sensitive topic', 'Policy risk', 'Controlled substance', 'Caller frustrated',
+    'Hard of hearing', 'Medicare Part D', 'New patient', 'Prefers email', 'Prefers text', 'Authorized representative'
   ];
 
   const GUIDANCE_KINDS = ['say', 'ask', 'tell', 'info', 'do', 'recommendation', 'caution', 'answer'];
@@ -454,8 +455,8 @@
           delta: { tools: ['verify_identity', 'send_otp', 'lookup_rx', 'check_insurance'] } },
         { speaker: 'caller', text: 'Hi, this is Maria Lopez. I tried to refill my cholesterol medication in the app and it says the insurance rejected it. I really need it before the weekend.',
           delta: {
-            activate: ['rx_issue'], tagsAdd: ['Insurance rejection'], suggestTool: 'verify_identity',
-            guidance: [{ kind: 'caution', text: 'She named her prescription before verification. Confirm nothing about the claim until name, DOB and the phone on file are checked.', source: 'KB · Caller identity verification' }],
+            activate: ['verification', 'rx_issue'], tagsAdd: ['Insurance rejection', 'Prefers text'], suggestTool: 'verify_identity',
+            guidance: [{ kind: 'caution', text: 'She named her prescription before verification: confirm nothing about the claim until identity is checked.', bullets: ['Record: prefers text; travels for work and has asked about vacation supplies before'], source: 'KB · Caller identity verification' }],
             bestReply: "I'm sorry about that, Maria, let's get it sorted before the weekend. First I need to verify a couple of details: can you confirm your date of birth and the phone number on the account?"
           } },
         { speaker: 'agent', text: "I'm sorry about that, Maria, let's get it sorted. Can you confirm your date of birth for me, and the phone number on the account?" },
@@ -475,7 +476,8 @@
             guidance: [{ kind: 'caution', text: 'Rejection reason not read back before rerunning.', bullets: ['She needs to hear it: code 79, refill too soon, 68% of the supply used, eligible again Friday 10/24', 'A 30-day rerun today rejects again'], source: 'KB · Insurance rejection codes' }]
           } },
         { speaker: 'caller', text: "Wait, why was it rejected? I haven't changed anything with my insurance.",
-          delta: { bestReply: "Nothing has changed with your insurance, Maria. It's a 'refill too soon' rejection: the plan only pays once about three-quarters of your current supply is used, and you're at 68%. It will go through on Friday the 24th." } },
+          delta: { guidance: [{ kind: 'say', text: 'Nothing changed on your plan; it is a timing rule. It pays at 75% of the supply used, and this clears Friday 10/24.' }],
+            bestReply: "Nothing has changed with your insurance, Maria. It's a 'refill too soon' rejection: the plan only pays once about three-quarters of your current supply is used, and you're at 68%. It will go through on Friday the 24th." } },
         { speaker: 'agent', text: "Nothing's changed with your plan. It's a 'refill too soon' rejection, insurance pays once about three-quarters of the supply is used, and you're a few days early. It'll go through on Friday the 24th.",
           delta: { steps: { p3: 'done' } } },
         { speaker: 'caller', text: "Friday's cutting it close, I leave Saturday morning. And honestly these copays are adding up, thirty dollars every single month.",
@@ -492,7 +494,7 @@
         { speaker: 'agent', text: 'Great, running that now as a 90-day supply.',
           delta: { steps: { c3: 'done' }, tool: { id: 'rerun_claim', inputs: { rx: '7731-2208', days: '90' } } } },
         { speaker: 'agent', text: "Done. The 90-day claim went through at twelve dollars, and it'll be ready for pickup today after 4:30 at the Main Street store.",
-          delta: { tools: ['send_confirmation', 'vaccine_slots', 'lookup_rx', 'transfer_rx'] } },
+          delta: { activate: ['wrapup'], tools: ['send_confirmation', 'vaccine_slots', 'lookup_rx', 'transfer_rx'] } },
         { speaker: 'caller', text: "Perfect, Main Street is fine. Oh, and while I have you, can I get a flu shot when I come in? My daughter's school needs the record.",
           delta: {
             steps: { w1: 'done' }, activate: ['immunization'], tagsAdd: ['Flu shot request'], suggestTool: 'vaccine_slots',
@@ -522,8 +524,8 @@
           delta: { tools: ['verify_identity', 'send_otp', 'transfer_rx', 'lookup_rx'] } },
         { speaker: 'caller', text: 'Hi, this is James Carter. I called a couple of weeks ago about moving my blood thinner over from CVS, and I have the prescription number from them now. Can we do that today?',
           delta: {
-            activate: ['transfer'], tagsAdd: ['Transfer request'], suggestTool: 'verify_identity',
-            guidance: [{ kind: 'caution', text: 'Record note: hard of hearing. Speak slowly and read every number back twice.', source: 'Customer record' }],
+            activate: ['verification', 'transfer'], tagsAdd: ['Transfer request', 'Hard of hearing', 'Medicare Part D'], suggestTool: 'verify_identity',
+            guidance: [{ kind: 'info', text: 'Hard of hearing per record: speak slowly and read every number back twice.', bullets: ['Medicare Part D (SilverScript); daughter Lauren is an authorized representative'], source: 'Customer record' }],
             bestReply: 'Absolutely, James, we can start that today. First let me verify a couple of details: your date of birth, and the phone number we have on file for you?'
           } },
         { speaker: 'agent', text: 'Absolutely, James. Let me verify a couple of details first. Can you give me your date of birth and the phone number on the account?' },
@@ -548,7 +550,7 @@
         { speaker: 'caller', text: "Fifteen minutes? Wonderful, I'll walk over now.",
           delta: { bestReply: "Actually, James, I need to correct myself. Because it's coming from CVS, our pharmacist has to call them first, so it's one to two business days, not fifteen minutes. I'll make sure you're told the moment it's ready." } },
         { speaker: 'agent', text: "Actually, I need to correct myself. Because it's coming from CVS, our pharmacist has to call them, so it's one to two business days. I'll let you know the moment it's ready.",
-          delta: { steps: { t3: 'done', w1: 'done' } } },
+          delta: { activate: ['wrapup'], steps: { t3: 'done', w1: 'done' } } },
         { speaker: 'caller', text: "Oh. Alright then. While I have you, the Eliquis company sent me a coupon card. Can I use that with my Medicare plan? It's getting expensive.",
           delta: {
             activate: ['cost'], tagsAdd: ['Price-sensitive'], suggestTool: 'check_insurance',
@@ -584,7 +586,8 @@
         { speaker: 'agent', text: 'Thank you for calling Walgreens Pharmacy on Main Street, this is Dana. How can I help you today?',
           delta: { tools: ['verify_identity', 'send_otp', 'lookup_rx', 'transfer_rx'] } },
         { speaker: 'caller', text: "Hi, it's Priya Nair. I need my inhaler refilled, and could I pick it up at the Davis Street store instead? It's right by my office.",
-          delta: { activate: ['transfer'], tagsAdd: ['Transfer request'], suggestTool: 'verify_identity',
+          delta: { activate: ['verification', 'transfer'], tagsAdd: ['Transfer request', 'New patient', 'Prefers email'], suggestTool: 'verify_identity',
+            guidance: [{ kind: 'info', text: 'New patient since 09/30, inhaler transferred from out of state; prefers email. She asked about Davis St pickup before.', source: 'Customer record' }],
             bestReply: 'Of course. Let me verify you first: can I get your date of birth and the phone number on the account?' } },
         { speaker: 'agent', text: 'Of course. Let me verify you first. Date of birth and the phone number on the account?' },
         { speaker: 'caller', text: 'July 30th, 1994, and the number ending in 0167.',
@@ -600,7 +603,7 @@
         { speaker: 'agent', text: 'Davis Street it is, moving it over now.',
           delta: { tool: { id: 'transfer_rx', inputs: { rx: '8810-2217', destination: 'Walgreens Davis St (#4488)', from: 'Walgreens Main St (#4471)' } } } },
         { speaker: 'agent', text: "Done. It'll be ready at Davis Street in about fifteen minutes.",
-          delta: { steps: { t3: 'done', w1: 'done' } } },
+          delta: { activate: ['wrapup'], steps: { t3: 'done', w1: 'done' } } },
         { speaker: 'caller', text: "Perfect. Also, I've needed it a lot more this week, like five or six times a day. Is it okay to keep using it that much?",
           delta: {
             activate: ['escalation'], tagsAdd: ['Escalation needed'], suggestTool: 'page_pharmacist',
@@ -612,7 +615,7 @@
           delta: { steps: { e1: 'done' }, tool: { id: 'page_pharmacist', inputs: { patient: 'Priya Nair', reason: 'Rescue inhaler use 5 to 6 times a day this week' } } } },
         { speaker: 'caller', text: 'Okay, thank you. Should I still pick up at Davis Street?',
           delta: {
-            guidance: [{ kind: 'caution', text: 'Preferred contact on record is email, not text. Confirm before sending.', source: 'Customer record' }],
+            guidance: [{ kind: 'do', text: 'Confirm the channel before sending: her record says email, not text.', source: 'Customer record' }],
             bestReply: "Yes, Davis Street in about fifteen minutes. Your record says you prefer email; shall I email you when it's ready? And the pharmacist will be with you in just a moment."
           } },
         { speaker: 'agent', text: 'Yes, Davis Street in about fifteen minutes. Your record says you prefer email; should I email you when it\'s ready?' },

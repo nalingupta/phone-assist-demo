@@ -51,6 +51,8 @@ h2, h3 { margin: 0; }
 .rail-warn.ok { color: #1d6f3f; }
 .rail-text { width: 100%; border: 1px solid var(--line-2); border-radius: 10px; padding: 8px 10px; resize: none; background: var(--surface); min-height: 56px; }
 .rail-hint { font-size: 11px; color: var(--muted); }
+.rail-select { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.rail-select select { flex: 1; min-width: 0; border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 8px; background: var(--surface); font-size: 13px; color: var(--fg); }
 .ai-status { font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; line-height: 1.35; }
 .ai-status.ok { color: #1d6f3f; }
 
@@ -64,10 +66,9 @@ h2, h3 { margin: 0; }
 /* workflow */
 .wf { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .wf-panel { background: var(--panel); border-radius: 8px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; overflow: auto; }
-.wf-group { padding: 4px 6px 6px; border-radius: 6px; border: 1px dashed transparent; }
-.wf-group.added { border-color: var(--accent); }
-.wf-group-title { font-weight: 700; font-size: 15px; padding-left: 26px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.wf-badge { font-size: 11px; font-weight: 600; color: var(--accent); }
+.wf-group { padding: 4px 6px 6px; border-radius: 6px; }
+.wf-group-title { font-weight: 700; font-size: 15px; padding-left: 26px; }
+.wf-empty { color: var(--muted); font-size: 13.5px; padding: 8px 6px; }
 .wf-step { display: flex; align-items: center; gap: 10px; padding: 3px 6px 3px 2px; border-radius: 6px; margin-left: -2px; }
 .wf-step.pending .wf-label { color: #5a5d66; }
 .wf-step.done .wf-label { color: var(--ok); font-weight: 600; }
@@ -97,6 +98,9 @@ h2, h3 { margin: 0; }
 /* tabs */
 .tabs { display: flex; gap: 34px; border-bottom: 1px solid var(--line); flex: none; align-items: flex-end; }
 .tabs-action { margin-left: auto; padding-bottom: 10px; white-space: nowrap; }
+.tab-badge { display: inline-block; margin-left: 8px; min-width: 20px; padding: 0 6px; border-radius: 10px; background: var(--warn); color: #fff; font-size: 12px; line-height: 20px; text-align: center; vertical-align: 3px; animation: blink 1.2s 3; }
+.incoming { background: #e3f3e9; color: #1d6f3f; border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+.incoming.wide { grid-column: 1 / -1; }
 .tab { border: 0; background: transparent; padding: 0 0 8px; font-size: 20px; font-weight: 700; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab.on { color: var(--fg); border-bottom-color: var(--fg); }
 .tabbody { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -223,6 +227,7 @@ h2, h3 { margin: 0; }
   .rail-note, .rail-hint, .rail-warn { flex: 1 1 100%; }
   .rail-note.center { flex: none; text-align: left; }
   .rail-text { flex: 1 1 220px; width: auto; min-height: 36px; height: 36px; padding: 7px 10px; }
+  .rail-select { order: 9; }
   .ai-status { flex: 1 1 100%; border-top: 0; padding-top: 0; order: 11; }
   .card { grid-template-columns: 290px minmax(0, 1fr); }
   .left { padding: 18px 16px 16px 20px; }
@@ -386,7 +391,7 @@ h2, h3 { margin: 0; }
   /* SOP workflow catalog                                                 */
   /* ------------------------------------------------------------------ */
   const SOP = [
-    { id: 'verification', title: 'Verification', always: true, when: 'Every call, before any prescription detail is discussed.',
+    { id: 'verification', title: 'Verification', when: 'As soon as the caller says what they need, before any prescription detail is discussed.',
       steps: [
         { id: 'v1', label: 'Confirm name and date of birth' },
         { id: 'v2', label: 'Send one-time passcode (SMS)' },
@@ -422,7 +427,7 @@ h2, h3 { margin: 0; }
         { id: 'e1', label: 'Tell caller a pharmacist will join' },
         { id: 'e2', label: 'Warm-transfer to pharmacist' }
       ] },
-    { id: 'wrapup', title: 'Wrap-up', always: true, when: 'Every call, before hanging up.',
+    { id: 'wrapup', title: 'Wrap-up', when: 'Once the main request is resolved, before hanging up.',
       steps: [
         { id: 'w1', label: 'Confirm pickup store and time' },
         { id: 'w2', label: 'Send confirmation (text or email)' },
@@ -432,7 +437,8 @@ h2, h3 { margin: 0; }
 
   const TAGS = [
     'Identity verified', 'Consent given', 'Insurance rejection', 'Price-sensitive', 'Flu shot request',
-    'Transfer request', 'Escalation needed', 'Sensitive topic', 'Policy risk', 'Controlled substance', 'Caller frustrated'
+    'Transfer request', 'Escalation needed', 'Sensitive topic', 'Policy risk', 'Controlled substance', 'Caller frustrated',
+    'Hard of hearing', 'Medicare Part D', 'New patient', 'Prefers email', 'Prefers text', 'Authorized representative'
   ];
 
   const GUIDANCE_KINDS = ['say', 'ask', 'tell', 'info', 'do', 'recommendation', 'caution', 'answer'];
@@ -714,8 +720,8 @@ h2, h3 { margin: 0; }
           delta: { tools: ['verify_identity', 'send_otp', 'lookup_rx', 'check_insurance'] } },
         { speaker: 'caller', text: 'Hi, this is Maria Lopez. I tried to refill my cholesterol medication in the app and it says the insurance rejected it. I really need it before the weekend.',
           delta: {
-            activate: ['rx_issue'], tagsAdd: ['Insurance rejection'], suggestTool: 'verify_identity',
-            guidance: [{ kind: 'caution', text: 'She named her prescription before verification. Confirm nothing about the claim until name, DOB and the phone on file are checked.', source: 'KB · Caller identity verification' }],
+            activate: ['verification', 'rx_issue'], tagsAdd: ['Insurance rejection', 'Prefers text'], suggestTool: 'verify_identity',
+            guidance: [{ kind: 'caution', text: 'She named her prescription before verification: confirm nothing about the claim until identity is checked.', bullets: ['Record: prefers text; travels for work and has asked about vacation supplies before'], source: 'KB · Caller identity verification' }],
             bestReply: "I'm sorry about that, Maria, let's get it sorted before the weekend. First I need to verify a couple of details: can you confirm your date of birth and the phone number on the account?"
           } },
         { speaker: 'agent', text: "I'm sorry about that, Maria, let's get it sorted. Can you confirm your date of birth for me, and the phone number on the account?" },
@@ -735,7 +741,8 @@ h2, h3 { margin: 0; }
             guidance: [{ kind: 'caution', text: 'Rejection reason not read back before rerunning.', bullets: ['She needs to hear it: code 79, refill too soon, 68% of the supply used, eligible again Friday 10/24', 'A 30-day rerun today rejects again'], source: 'KB · Insurance rejection codes' }]
           } },
         { speaker: 'caller', text: "Wait, why was it rejected? I haven't changed anything with my insurance.",
-          delta: { bestReply: "Nothing has changed with your insurance, Maria. It's a 'refill too soon' rejection: the plan only pays once about three-quarters of your current supply is used, and you're at 68%. It will go through on Friday the 24th." } },
+          delta: { guidance: [{ kind: 'say', text: 'Nothing changed on your plan; it is a timing rule. It pays at 75% of the supply used, and this clears Friday 10/24.' }],
+            bestReply: "Nothing has changed with your insurance, Maria. It's a 'refill too soon' rejection: the plan only pays once about three-quarters of your current supply is used, and you're at 68%. It will go through on Friday the 24th." } },
         { speaker: 'agent', text: "Nothing's changed with your plan. It's a 'refill too soon' rejection, insurance pays once about three-quarters of the supply is used, and you're a few days early. It'll go through on Friday the 24th.",
           delta: { steps: { p3: 'done' } } },
         { speaker: 'caller', text: "Friday's cutting it close, I leave Saturday morning. And honestly these copays are adding up, thirty dollars every single month.",
@@ -752,7 +759,7 @@ h2, h3 { margin: 0; }
         { speaker: 'agent', text: 'Great, running that now as a 90-day supply.',
           delta: { steps: { c3: 'done' }, tool: { id: 'rerun_claim', inputs: { rx: '7731-2208', days: '90' } } } },
         { speaker: 'agent', text: "Done. The 90-day claim went through at twelve dollars, and it'll be ready for pickup today after 4:30 at the Main Street store.",
-          delta: { tools: ['send_confirmation', 'vaccine_slots', 'lookup_rx', 'transfer_rx'] } },
+          delta: { activate: ['wrapup'], tools: ['send_confirmation', 'vaccine_slots', 'lookup_rx', 'transfer_rx'] } },
         { speaker: 'caller', text: "Perfect, Main Street is fine. Oh, and while I have you, can I get a flu shot when I come in? My daughter's school needs the record.",
           delta: {
             steps: { w1: 'done' }, activate: ['immunization'], tagsAdd: ['Flu shot request'], suggestTool: 'vaccine_slots',
@@ -782,8 +789,8 @@ h2, h3 { margin: 0; }
           delta: { tools: ['verify_identity', 'send_otp', 'transfer_rx', 'lookup_rx'] } },
         { speaker: 'caller', text: 'Hi, this is James Carter. I called a couple of weeks ago about moving my blood thinner over from CVS, and I have the prescription number from them now. Can we do that today?',
           delta: {
-            activate: ['transfer'], tagsAdd: ['Transfer request'], suggestTool: 'verify_identity',
-            guidance: [{ kind: 'caution', text: 'Record note: hard of hearing. Speak slowly and read every number back twice.', source: 'Customer record' }],
+            activate: ['verification', 'transfer'], tagsAdd: ['Transfer request', 'Hard of hearing', 'Medicare Part D'], suggestTool: 'verify_identity',
+            guidance: [{ kind: 'info', text: 'Hard of hearing per record: speak slowly and read every number back twice.', bullets: ['Medicare Part D (SilverScript); daughter Lauren is an authorized representative'], source: 'Customer record' }],
             bestReply: 'Absolutely, James, we can start that today. First let me verify a couple of details: your date of birth, and the phone number we have on file for you?'
           } },
         { speaker: 'agent', text: 'Absolutely, James. Let me verify a couple of details first. Can you give me your date of birth and the phone number on the account?' },
@@ -808,7 +815,7 @@ h2, h3 { margin: 0; }
         { speaker: 'caller', text: "Fifteen minutes? Wonderful, I'll walk over now.",
           delta: { bestReply: "Actually, James, I need to correct myself. Because it's coming from CVS, our pharmacist has to call them first, so it's one to two business days, not fifteen minutes. I'll make sure you're told the moment it's ready." } },
         { speaker: 'agent', text: "Actually, I need to correct myself. Because it's coming from CVS, our pharmacist has to call them, so it's one to two business days. I'll let you know the moment it's ready.",
-          delta: { steps: { t3: 'done', w1: 'done' } } },
+          delta: { activate: ['wrapup'], steps: { t3: 'done', w1: 'done' } } },
         { speaker: 'caller', text: "Oh. Alright then. While I have you, the Eliquis company sent me a coupon card. Can I use that with my Medicare plan? It's getting expensive.",
           delta: {
             activate: ['cost'], tagsAdd: ['Price-sensitive'], suggestTool: 'check_insurance',
@@ -844,7 +851,8 @@ h2, h3 { margin: 0; }
         { speaker: 'agent', text: 'Thank you for calling Walgreens Pharmacy on Main Street, this is Dana. How can I help you today?',
           delta: { tools: ['verify_identity', 'send_otp', 'lookup_rx', 'transfer_rx'] } },
         { speaker: 'caller', text: "Hi, it's Priya Nair. I need my inhaler refilled, and could I pick it up at the Davis Street store instead? It's right by my office.",
-          delta: { activate: ['transfer'], tagsAdd: ['Transfer request'], suggestTool: 'verify_identity',
+          delta: { activate: ['verification', 'transfer'], tagsAdd: ['Transfer request', 'New patient', 'Prefers email'], suggestTool: 'verify_identity',
+            guidance: [{ kind: 'info', text: 'New patient since 09/30, inhaler transferred from out of state; prefers email. She asked about Davis St pickup before.', source: 'Customer record' }],
             bestReply: 'Of course. Let me verify you first: can I get your date of birth and the phone number on the account?' } },
         { speaker: 'agent', text: 'Of course. Let me verify you first. Date of birth and the phone number on the account?' },
         { speaker: 'caller', text: 'July 30th, 1994, and the number ending in 0167.',
@@ -860,7 +868,7 @@ h2, h3 { margin: 0; }
         { speaker: 'agent', text: 'Davis Street it is, moving it over now.',
           delta: { tool: { id: 'transfer_rx', inputs: { rx: '8810-2217', destination: 'Walgreens Davis St (#4488)', from: 'Walgreens Main St (#4471)' } } } },
         { speaker: 'agent', text: "Done. It'll be ready at Davis Street in about fifteen minutes.",
-          delta: { steps: { t3: 'done', w1: 'done' } } },
+          delta: { activate: ['wrapup'], steps: { t3: 'done', w1: 'done' } } },
         { speaker: 'caller', text: "Perfect. Also, I've needed it a lot more this week, like five or six times a day. Is it okay to keep using it that much?",
           delta: {
             activate: ['escalation'], tagsAdd: ['Escalation needed'], suggestTool: 'page_pharmacist',
@@ -872,7 +880,7 @@ h2, h3 { margin: 0; }
           delta: { steps: { e1: 'done' }, tool: { id: 'page_pharmacist', inputs: { patient: 'Priya Nair', reason: 'Rescue inhaler use 5 to 6 times a day this week' } } } },
         { speaker: 'caller', text: 'Okay, thank you. Should I still pick up at Davis Street?',
           delta: {
-            guidance: [{ kind: 'caution', text: 'Preferred contact on record is email, not text. Confirm before sending.', source: 'Customer record' }],
+            guidance: [{ kind: 'do', text: 'Confirm the channel before sending: her record says email, not text.', source: 'Customer record' }],
             bestReply: "Yes, Davis Street in about fifteen minutes. Your record says you prefer email; shall I email you when it's ready? And the pharmacist will be with you in just a moment."
           } },
         { speaker: 'agent', text: 'Yes, Davis Street in about fifteen minutes. Your record says you prefer email; should I email you when it\'s ready?' },
@@ -918,6 +926,17 @@ h2, h3 { margin: 0; }
     type: 'object',
     properties: {
       activeGroups: { type: 'array', items: { type: 'string' } },
+      customGroups: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' }, title: { type: 'string' },
+            steps: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, label: { type: 'string' }, status: { type: 'string', enum: ['pending', 'done', 'missed'] } }, required: ['id', 'label', 'status'], additionalProperties: false } }
+          },
+          required: ['id', 'title', 'steps'], additionalProperties: false
+        }
+      },
       steps: {
         type: 'array',
         items: {
@@ -932,7 +951,7 @@ h2, h3 { margin: 0; }
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['ask', 'tell', 'info', 'do', 'recommendation', 'caution'] },
+            kind: { type: 'string', enum: ['say', 'ask', 'tell', 'info', 'do', 'recommendation', 'caution'] },
             text: { type: 'string' },
             bullets: { type: 'array', items: { type: 'string' } },
             source: { type: 'string' }
@@ -943,7 +962,7 @@ h2, h3 { margin: 0; }
       tools: { type: 'array', items: { type: 'string' } },
       suggestedTool: { type: 'string' }
     },
-    required: ['activeGroups', 'steps', 'tags', 'guidance', 'tools', 'suggestedTool'],
+    required: ['activeGroups', 'customGroups', 'steps', 'tags', 'guidance', 'tools', 'suggestedTool'],
     additionalProperties: false
   };
   const REPLY_SCHEMA = {
@@ -1010,9 +1029,10 @@ h2, h3 { margin: 0; }
 
 # Output
 Return one JSON object with exactly these keys:
-- activeGroups: ids of the workflow groups that apply to this call so far. Always include "verification" and "wrapup".
-- steps: one {id, status} for EVERY step of every active group. status is "done", "pending" or "missed".
-- tags: tag strings from the vocabulary that describe the call so far. Add at most two custom tags (two or three words) only when nothing in the vocabulary fits.
+- activeGroups: ids of the catalog workflow groups that apply to this call so far. The screen starts blank: before the caller has said what they need, return []. At the caller's first real request return "verification" plus the group for that topic. Add a group the moment a new topic comes up. Add "wrapup" once the main request is resolved. Never remove a group.
+- customGroups: when the caller's topic has no catalog group, invent one: a short id (lowercase, underscores), a two or three word title, and 2 to 4 concrete steps in SOP order, each with its status. Keep it [] otherwise. Keep a custom group's id and steps stable once created.
+- steps: one {id, status} for EVERY step of every active catalog group. status is "done", "pending" or "missed".
+- tags: at most 4 short labels that change how the agent should handle this call or what to document: a verified identity, a plan type or coverage fact, a preference on record (prefers email, hard of hearing), a state of the conversation (price-sensitive, escalation needed, consent given). Prefer the vocabulary; a custom tag of two or three words is fine when it fits better. No tags that merely restate the topic.
 - guidance: 0, 1 or at most 2 cards for THIS moment, each {kind, text, bullets, source}. One event (the latest utterance or tool result) gets at most ONE card: put several points into bullets (each under 15 words) under a one-line text. An empty array is the normal answer when nothing new deserves attention.
 - tools: 3 to 6 tool ids the agent is most likely to need next, most useful first.
 - suggestedTool: the one tool id the agent should run right now because the situation calls for it (a verification step is due, a claim needs checking, a slot needs booking), or "" when none.
@@ -1021,18 +1041,19 @@ Return one JSON object with exactly these keys:
 - "done" only AFTER the agent actually performed the step: a TOOL line shows it ran, or the agent's own words show it was said. A tool run completes its matching step (Send OTP completes "Send one-time passcode", Check Insurance completes "Check refill and claim status", Page Pharmacist completes the warm-transfer, Log Summary completes the summary, and so on). Never mark a step done because the caller supplied information the agent has not acted on yet: the caller giving a date of birth does not complete "Confirm name and date of birth" until the agent confirms or verifies it. A caller's explicit confirmation (the store, the time, a choice) does complete a "confirm" step.
 - "missed" when the agent has moved on to a later step in the same group, or to a later group, without doing this one. Example: rerunning a claim before reading the rejection reason back to the caller. If the agent does it later, it becomes "done".
 - otherwise "pending".
-- Activate a group the moment its trigger appears and keep it active for the rest of the call. Never deactivate a group.
+- Activate a group the moment its trigger appears and keep it active for the rest of the call. Never deactivate a group. The screen shows only active groups, so the workflow is built up from the conversation rather than shown in advance.
 
-# Guidance cards: only what is worth the agent's attention
-The agent is trained. Do not restate what any trained agent would do anyway (greeting, asking for date of birth, saying thank you, confirming the obvious), and never write lines for the agent to say verbatim; the Best Reply button covers that on request. A card earns its place only when it changes what the agent does next:
+# Guidance cards: contextual, crisp, not every turn
+The agent is on the phone and must not spend time reading. A card appears when there is something the agent should know or keep in mind for the next thing they say or do; when there is nothing new, return []. Do not restate what a trained agent would do anyway (greeting, asking for date of birth, thanking). Kinds:
+- info: a fact from the customer record or the knowledge base that matters right now (a preference, a plan rule, a rejection code's meaning, a timeline). For policy, source is "KB · <document title>".
 - caution: a compliance or policy risk (prescription details before verification, a step skipped, a promise the policy does not allow, a clinical question that must go to the pharmacist).
-- info: a policy fact with specifics the agent may not have at hand (a rejection code's meaning, an eligibility rule, a timeline). source must be "KB · <document title>".
-- recommendation: a non-obvious offer or next best action grounded in the customer record or a tool output; source names where it comes from.
-- tell: a specific result the agent must relay, with the numbers (a copay, a ready time, a confirmation number, a date).
-- do: an action with a detail that matters (run the 90-day claim, not 30), or the summary to log.
-- ask: a question that is required but easy to forget, never a routine one.
+- recommendation: the next best action or an offer worth making, grounded in the record or a tool output; source names where it comes from.
+- tell: a result the agent must relay, with the numbers (a copay, a ready time, a confirmation number, a date).
+- say: a short suggested phrasing for a moment that is delicate or easy to get wrong (a pushback, a refusal, a correction); one sentence, never a routine line.
+- do: an action with a detail that matters (run the 90-day claim, not 30; confirm the channel before sending).
+- ask: a question that is required but easy to forget.
 Timing: the card must land BEFORE the agent responds, so it is triggered by what the caller just said or what a tool just returned; a policy reminder the agent needs for the next sentence is exactly what belongs here.
-Rules: text under 20 words, bullets under 15 words each; most of the time return 0 or 1 cards, never more than 2. Never repeat a card already shown unless the situation changed. source is "" when nothing backs the card. Never invent policy, prices or eligibility; use only the knowledge base, the customer record and tool outputs.
+Rules: text under 18 words, at most 3 bullets of under 12 words each; usually 0 or 1 card, never more than 2. Never repeat a card already shown unless the situation changed. source is "" when nothing backs the card. Never invent policy, prices or eligibility; use only the knowledge base, the customer record and tool outputs.
 
 # Workflow groups and steps
 ${c.groups}
@@ -1393,7 +1414,8 @@ ${customerText(user)}`;
   function freshCall() {
     return {
       callStatus: 'idle', callStart: null, transcript: [], interim: '',
-      groups: D.SOP.map((g) => ({ id: g.id, title: g.title, active: !!g.always, added: false, steps: g.steps.map((s) => ({ id: s.id, label: s.label, status: 'pending' })) })),
+      groups: D.SOP.map((g) => ({ id: g.id, title: g.title, active: false, steps: g.steps.map((s) => ({ id: s.id, label: s.label, status: 'pending' })) })),
+      unseenGuidance: 0,
       tags: [], guidance: [], batch: 0, tools: D.DEFAULT_TOOLS.slice(),
       selectedTool: null, toolInputs: {}, toolBusy: false, toolResult: null, toolRuns: [], suggestedTool: null,
       scenarioId: null, scriptIndex: 0, autoplay: false, listening: null, speaking: null, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
@@ -1402,7 +1424,7 @@ ${customerText(user)}`;
 
   const Store = (() => {
     let state = Object.assign(freshCall(), {
-      userId: pickRandom(D.USERS).id, mode: 'scripted', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
+      userId: pickRandom(D.USERS).id, incoming: 'random', mode: 'scripted', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
       aiStatus: AI.status(), notice: '', voiceError: ''
     });
     const subs = new Set();
@@ -1444,7 +1466,7 @@ ${customerText(user)}`;
     Store.set((s) => {
       const batch = s.batch + 1;
       const fresh = cards.map((c) => ({ id: nextId(), batch, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()) : [], source: c.source || '' }));
-      return { batch, guidance: s.guidance.concat(fresh).slice(-60) };
+      return { batch, guidance: s.guidance.concat(fresh).slice(-60), unseenGuidance: s.tab === 'guidance' ? 0 : s.unseenGuidance + fresh.length };
     });
   }
 
@@ -1460,10 +1482,7 @@ ${customerText(user)}`;
 
   function activateGroups(ids) {
     if (!ids || !ids.length) return;
-    Store.set((s) => {
-      const midCall = s.transcript.length > 3;
-      return { groups: s.groups.map((g) => (ids.includes(g.id) && !g.active ? { ...g, active: true, added: midCall, changed: Date.now() } : g)) };
-    });
+    Store.set((s) => ({ groups: s.groups.map((g) => (ids.includes(g.id) && !g.active ? { ...g, active: true, changed: Date.now() } : g)) }));
   }
 
   function addTags(add, remove) {
@@ -1526,8 +1545,24 @@ ${customerText(user)}`;
 
   function applyAnalysis(res) {
     if (!res || typeof res !== 'object') throw new Error('Empty analysis');
-    const always = D.SOP.filter((g) => g.always).map((g) => g.id);
-    activateGroups((res.activeGroups || []).concat(always));
+    activateGroups(res.activeGroups || []);
+    if (Array.isArray(res.customGroups) && res.customGroups.length) {
+      Store.set((s) => {
+        let groups = s.groups;
+        res.customGroups.forEach((cg) => {
+          if (!cg || !cg.id || !cg.title || !Array.isArray(cg.steps) || !cg.steps.length) return;
+          const id = String(cg.id).toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
+          const steps = cg.steps.filter((st) => st && st.id && st.label).slice(0, 6).map((st) => ({ id: `${id}.${String(st.id)}`, label: String(st.label).slice(0, 80), status: ['done', 'pending', 'missed'].includes(st.status) ? st.status : 'pending' }));
+          const existing = groups.find((g) => g.id === id);
+          if (existing) {
+            groups = groups.map((g) => (g.id === id ? { ...g, active: true, steps: g.steps.map((old) => { const n = steps.find((x) => x.id === old.id); return n && n.status !== old.status ? { ...old, status: n.status, changed: Date.now() } : old; }).concat(steps.filter((n) => !g.steps.some((old) => old.id === n.id))) } : g));
+          } else {
+            groups = groups.concat([{ id, title: String(cg.title).slice(0, 40), active: true, custom: true, changed: Date.now(), steps }]);
+          }
+        });
+        return { groups };
+      });
+    }
     const map = {};
     (res.steps || []).forEach((st) => { if (st && st.id && ['done', 'pending', 'missed'].includes(st.status)) map[st.id] = st.status; });
     setSteps(map);
@@ -1579,20 +1614,20 @@ ${customerText(user)}`;
     const s = Store.get();
     let scenarioId = null;
     let userId;
+    const chosen = opts.userId || (s.incoming !== 'random' ? s.incoming : null);
     if (s.mode === 'scripted') {
-      const sc = (opts.scenarioId && scenarioById(opts.scenarioId)) || pickRandom(D.SCENARIOS, lastScenarioId);
+      const sc = (opts.scenarioId && scenarioById(opts.scenarioId)) || (chosen && D.SCENARIOS.find((x) => x.userId === chosen)) || pickRandom(D.SCENARIOS, lastScenarioId);
       scenarioId = sc.id;
       userId = sc.userId;
       lastScenarioId = sc.id;
     } else {
-      userId = (opts.userId && userById(opts.userId).id === opts.userId) ? opts.userId : pickRandom(D.USERS, lastUserId).id;
+      userId = (chosen && userById(chosen).id === chosen) ? chosen : pickRandom(D.USERS, lastUserId).id;
       lastUserId = userId;
     }
-    Store.set(Object.assign(freshCall(), { userId, scenarioId, callStatus: 'active', callStart: Date.now(), tab: 'guidance', aiStatus: AI.status() }));
+    Store.set(Object.assign(freshCall(), { userId, scenarioId, callStatus: 'active', callStart: Date.now(), tab: 'customer', aiStatus: AI.status() }));
     if (s.mode === 'scripted') {
       if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().scriptIndex === 0) playTurn(0, { interrupt: false }); }, 300);
     } else {
-      suggestTool('verify_identity');
       if (!AI.available()) notify('No Claude connection: lines will be transcribed but the panels will not update. Open Settings to connect.');
     }
   }
@@ -1854,7 +1889,7 @@ ${customerText(user)}`;
             <button class=${'rail-small ' + (s.settings.audio ? '' : 'off')} title=${TTS.supported ? 'Read the scripted lines aloud' : 'Speech synthesis is not available in this browser'} onClick=${() => updateSettings({ audio: !s.settings.audio })}>${s.settings.audio ? '🔊 Audio on' : '🔇 Audio off'}</button>
             <span class="rail-note center">${sc ? `Turn ${Math.min(s.scriptIndex, total)} of ${total}` : 'Random scenario'}</span>
           </div>
-          <div class="rail-note">${sc ? html`<b>${user.name}</b> · ${sc.title}` : 'Start call picks one of three callers and situations at random.'}</div>
+          <div class="rail-note">${sc ? html`<b>${user.phone}</b> · ${sc.title}` : 'Pick an incoming number below, or leave it random.'}</div>
           ${s.settings.audio && !TTS.supported ? html`<div class="rail-warn">No speech synthesis here; lines play silently.</div>` : ''}
           ${s.settings.engine === 'ai' ? html`<div class=${'rail-warn ' + (AI.available() ? 'ok' : '')}>Claude drives the panels for this replay${AI.available() ? '' : ', but it is not connected'}.</div>` : ''}
         ` : html`
@@ -1863,7 +1898,7 @@ ${customerText(user)}`;
               ? (s.listening ? html`<span class="rec">● Listening.</span> Speak naturally; each pause becomes a line.` : 'Pick who you are speaking as, then talk. Click again to stop.')
               : 'Voice input needs Chrome or Edge. Type lines below.'}
           </div>
-          <div class="rail-note">${active || s.callStatus === 'ended' ? html`Caller on record: <b>${user.name}</b> (picked at random)` : 'Start call picks a caller record at random.'}</div>
+          <div class="rail-note">${active || s.callStatus === 'ended' ? html`Incoming number <b>${user.phone}</b> matched to a record; see Customer 360.` : 'Pick an incoming number below, or leave it random.'}</div>
           <textarea id="live-draft" class="rail-text" rows="2" placeholder="Or type a line here…" value=${draft} onInput=${(e) => setDraft(e.target.value)}
             onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(e.altKey ? 'agent' : 'caller'); } }}></textarea>
           <div class="rail-row">
@@ -1873,6 +1908,13 @@ ${customerText(user)}`;
           <div class="rail-hint">Enter sends as caller, Alt+Enter as agent.</div>
         `}
 
+        <label class="rail-select" title="Which phone number the simulated call comes from">
+          <span>Incoming number</span>
+          <select value=${s.incoming} disabled=${active} onChange=${(e) => Store.set({ incoming: e.target.value })}>
+            <option value="random">Random</option>
+            ${D.USERS.map((u) => html`<option key=${u.id} value=${u.id}>${u.phone}</option>`)}
+          </select>
+        </label>
         <div class="rail-row">
           <button class="rail-btn ghost" disabled=${!active} onClick=${endCall}>End call</button>
           <button class="rail-btn ghost" disabled=${s.callStatus === 'idle' && !s.transcript.length} onClick=${resetAll}>Reset</button>
@@ -1893,9 +1935,10 @@ ${customerText(user)}`;
       <div class="wf">
         <h2 class="panel-title">Workflow Steps</h2>
         <div class="wf-panel">
+          ${groups.length ? '' : html`<div class="wf-empty">${s.callStatus === 'idle' ? 'Steps appear once a call starts and the caller says what they need.' : 'Listening for what the caller needs…'}</div>`}
           ${groups.map((g) => html`
-            <div key=${g.id + ':' + (g.changed || 0)} class=${'wf-group ' + (g.added ? 'added' : '') + (g.changed ? ' pop' : '')}>
-              <div class="wf-group-title">${g.title}${g.added ? html`<span class="wf-badge">added mid-call</span>` : ''}</div>
+            <div key=${g.id + ':' + (g.changed || 0)} class=${'wf-group' + (g.changed ? ' pop' : '')}>
+              <div class="wf-group-title">${g.title}</div>
               ${g.steps.map((st) => html`
                 <div key=${st.id + ':' + (st.changed || 0)} class=${'wf-step ' + st.status + (st.changed ? ' pop' : '')}>
                   <${StepIcon} status=${st.status} />
@@ -1919,8 +1962,8 @@ ${customerText(user)}`;
   }
 
   function Tabs({ s }) {
-    const tab = (id, label) => html`<button class=${'tab ' + (s.tab === id ? 'on' : '')} onClick=${() => Store.set({ tab: id })}>${label}</button>`;
-    return html`<div class="tabs">${tab('guidance', 'Live Guidance')}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}
+    const tab = (id, label, badge) => html`<button class=${'tab ' + (s.tab === id ? 'on' : '')} onClick=${() => Store.set({ tab: id, unseenGuidance: id === 'guidance' ? 0 : s.unseenGuidance })}>${label}${badge ? html`<span class="tab-badge">${badge}</span>` : ''}</button>`;
+    return html`<div class="tabs">${tab('guidance', 'Live Guidance', s.tab !== 'guidance' && s.unseenGuidance ? s.unseenGuidance : 0)}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}
       ${s.tab === 'guidance' && s.guidance.length ? html`<button class="link tabs-action" onClick=${() => Store.set({ guidance: [] })}>Clear guidance</button>` : ''}</div>`;
   }
 
@@ -2026,6 +2069,7 @@ ${customerText(user)}`;
     const kv = (rows) => html`<dl class="kv">${rows.map(([k, v]) => html`<div key=${k}><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>`;
     return html`
       <div class="c360">
+        ${s.callStatus !== 'idle' ? html`<div class="incoming wide">☏ Incoming call from <b>${u.phone}</b> · matched to <b>${u.name}</b>${s.callStatus === 'ended' ? ' · call ended' : ''}</div>` : ''}
         <section>
           <h3>Profile</h3>
           ${kv([['Name', u.name], ['Date of birth', u.dob], ['Phone', u.phone], ['Email', u.email], ['Preferred contact', u.preferredContact], ['Language', u.language]])}
