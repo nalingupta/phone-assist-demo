@@ -1,6 +1,7 @@
 /* Phone Assist demo server.
    Serves the static demo and keeps the API keys on the server side:
-     POST /api/llm    -> GPT-5.6 Luna with structured JSON output
+     POST /api/llm     -> GPT-5.6 Luna with structured JSON output
+     GET  /api/prompts -> prompts/*.md, tools.md and kb/*.md as text
      POST /api/tts    -> ElevenLabs text to speech (audio/mpeg)
      GET  /api/config -> which services are configured
    Environment: OPENAI_API_KEY, ELEVENLABS_API_KEY, optional OPENAI_MODEL,
@@ -82,44 +83,61 @@ function refused(data) {
   return false;
 }
 
-async function handleLlm(req, res) {
-  if (!OPENAI_KEY) return send(res, 503, { error: 'OpenAI is not configured on this server (OPENAI_API_KEY missing).' });
-  const body = await readJson(req);
-  const { system, user, schema, maxTokens, effort } = body;
-  if (!system || !user || !schema) return send(res, 400, { error: 'system, user and schema are required' });
+/* Calls the Responses API and returns { ok, json, model } or { ok: false, status, error }. */
+async function callOpenAI({ instructions, input, format, maxTokens, effort }) {
   const chosenEffort = EFFORTS.has(effort) ? effort : (EFFORTS.has(DEFAULT_EFFORT) ? DEFAULT_EFFORT : 'low');
   const maxOut = Math.min(Math.max(Number(maxTokens) || 8000, 1024), 16000);
   try {
     const r = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: { authorization: `Bearer ${OPENAI_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        instructions: system,
-        input: user,
-        reasoning: { effort: chosenEffort },
-        max_output_tokens: maxOut,
-        text: { format: { type: 'json_schema', name: 'phone_assist', strict: true, schema } }
-      })
+      body: JSON.stringify({ model: MODEL, instructions, input, reasoning: { effort: chosenEffort }, max_output_tokens: maxOut, text: { format } })
     });
     const data = await r.json().catch(() => null);
     if (!r.ok) {
       const msg = data && data.error && data.error.message ? data.error.message : `OpenAI request failed (${r.status}).`;
-      return send(res, r.status === 401 ? 503 : 502, { error: msg });
+      return { ok: false, status: r.status === 401 ? 503 : 502, error: msg };
     }
-    if (refused(data)) return send(res, 422, { error: 'OpenAI declined this request.' });
+    if (refused(data)) return { ok: false, status: 422, error: 'OpenAI declined this request.' };
     if (data && data.status === 'incomplete') {
       const reason = data.incomplete_details && data.incomplete_details.reason;
-      return send(res, 502, { error: `OpenAI stopped early (${reason || 'incomplete'}).` });
+      return { ok: false, status: 502, error: `OpenAI stopped early (${reason || 'incomplete'}).` };
     }
     const text = outputText(data);
-    if (!text) return send(res, 502, { error: 'OpenAI returned no text.' });
-    let parsed;
-    try { parsed = JSON.parse(text); } catch (e) { return send(res, 502, { error: 'OpenAI returned something that was not JSON.' }); }
-    return send(res, 200, { result: parsed, model: (data && data.model) || MODEL });
+    if (!text) return { ok: false, status: 502, error: 'OpenAI returned no text.' };
+    try { return { ok: true, json: JSON.parse(text), model: (data && data.model) || MODEL }; }
+    catch (e) { return { ok: false, status: 502, error: 'OpenAI returned something that was not JSON.' }; }
   } catch (e) {
-    return send(res, 502, { error: (e && e.message) || 'OpenAI request failed.' });
+    return { ok: false, status: 502, error: (e && e.message) || 'OpenAI request failed.' };
   }
+}
+
+async function handleLlm(req, res) {
+  if (!OPENAI_KEY) return send(res, 503, { error: 'OpenAI is not configured on this server (OPENAI_API_KEY missing).' });
+  const body = await readJson(req);
+  const { system, user, schema, maxTokens, effort } = body;
+  if (!system || !user || !schema) return send(res, 400, { error: 'system, user and schema are required' });
+  const r = await callOpenAI({ instructions: system, input: user, format: { type: 'json_schema', name: 'phone_assist', strict: true, schema }, maxTokens, effort });
+  if (!r.ok) return send(res, r.status, { error: r.error });
+  return send(res, 200, { result: r.json, model: r.model });
+}
+
+/* ---------------- prompt files ---------------- */
+const PROMPT_FILES = ['system_prompt', 'phone_assist', 'phone_assist_best_reply', 'chat'];
+
+function readText(rel) {
+  try { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch (e) { return ''; }
+}
+
+/* Read from disk on every request so an edit only needs a page refresh. */
+function loadPromptFiles() {
+  const prompts = {};
+  for (const name of PROMPT_FILES) prompts[name] = readText(`prompts/${name}.md`);
+  let kb = [];
+  try {
+    kb = fs.readdirSync(path.join(ROOT, 'kb')).filter((f) => f.endsWith('.md')).sort().map((file) => ({ file, text: readText(`kb/${file}`) }));
+  } catch (e) { kb = []; }
+  return { prompts, tools: readText('tools.md'), kb };
 }
 
 async function handleTts(req, res) {
@@ -166,6 +184,7 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
     if (pathname === '/api/config' && req.method === 'GET') return send(res, 200, { openai: !!OPENAI_KEY, model: OPENAI_KEY ? MODEL : null, elevenlabs: !!ELEVEN_KEY, build: BUILD });
     if ((pathname === '/api/llm' || pathname === '/api/claude') && req.method === 'POST') return await handleLlm(req, res);
+    if (pathname === '/api/prompts' && req.method === 'GET') return send(res, 200, loadPromptFiles());
     if (pathname === '/api/tts' && req.method === 'POST') return await handleTts(req, res);
     if (pathname.startsWith('/api/')) return send(res, 404, { error: 'Unknown API route' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');

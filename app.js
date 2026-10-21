@@ -27,7 +27,15 @@
   const nextId = () => ++uid;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const userById = (id) => D.USERS.find((u) => u.id === id) || D.USERS[0];
-  const toolById = (id) => D.TOOLS.find((t) => t.id === id);
+  const toolById = (id) => AI.tools.find((t) => t.id === id);
+  const defaultTools = () => AI.tools.slice(0, 6).map((t) => t.id);
+  const MAX_AUTO_TOOLS_PER_TURN = 3;
+  const STEP_STATUS = ['pending', 'done', 'missed'];
+  const fmtVal = (v) => {
+    if (v == null) return '';
+    if (Array.isArray(v)) return v.map((x) => (x && typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ');
+    return typeof v === 'object' ? JSON.stringify(v) : String(v);
+  };
   const scenarioById = (id) => D.SCENARIOS.find((sc) => sc.id === id) || null;
   const pickRandom = (list, notId) => {
     const pool = list.length > 1 ? list.filter((x) => x.id !== notId) : list;
@@ -37,9 +45,9 @@
   function freshCall() {
     return {
       callStatus: 'idle', callStart: null, transcript: [], interim: '',
-      groups: D.SOP.map((g) => ({ id: g.id, title: g.title, active: false, steps: g.steps.map((s) => ({ id: s.id, label: s.label, status: 'pending' })) })),
+      groups: [],
       unseenGuidance: 0,
-      tags: [], guidance: [], batch: 0, tools: D.DEFAULT_TOOLS.slice(),
+      tags: [], guidance: [], batch: 0, tools: defaultTools(), toolPrefill: {},
       selectedTool: null, toolInputs: {}, toolBusy: false, toolResult: null, toolRuns: [], suggestedTool: null,
       scenarioId: null, scriptIndex: 0, autoplay: false, listening: null, speaking: null, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
     };
@@ -67,7 +75,6 @@
     return s;
   }
 
-  const effectiveEngine = (s) => (AI.available() ? 'ai' : 'script');   // GPT-5.6 Luna drives the panels whenever it is reachable
   const currentScenario = () => scenarioById(Store.get().scenarioId);
   const elapsed = () => { const s = Store.get(); return s.callStart ? (Date.now() - s.callStart) / 1000 : 0; };
   const fmtClock = (t) => { const s = Math.max(0, Math.round(t || 0)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
@@ -97,55 +104,12 @@
     });
   }
 
-  function setSteps(statusMap) {
-    if (!statusMap) return;
-    const now = Date.now();
-    Store.set((s) => ({ groups: s.groups.map((g) => ({ ...g, steps: g.steps.map((st) => (statusMap[st.id] && statusMap[st.id] !== st.status ? { ...st, status: statusMap[st.id], changed: now } : st)) })) }));
-  }
-
-  function suggestTool(id) {
-    Store.set({ suggestedTool: id && toolById(id) ? id : null });
-  }
-
-  function activateGroups(ids) {
-    if (!ids || !ids.length) return;
-    Store.set((s) => ({ groups: s.groups.map((g) => (ids.includes(g.id) && !g.active ? { ...g, active: true, changed: Date.now() } : g)) }));
-  }
-
-  function addTags(add, remove) {
-    Store.set((s) => {
-      let tags = s.tags.filter((t) => !(remove || []).includes(t));
-      (add || []).forEach((t) => { if (!tags.includes(t)) tags = tags.concat([t]); });
-      return { tags };
-    });
-  }
-
-  function setTools(ids) {
-    const known = (ids || []).filter((id) => toolById(id));
-    if (known.length) Store.set({ tools: known });
-  }
-
-  function applyDelta(d) {
-    if (!d) return;
-    activateGroups(d.activate);
-    setSteps(d.steps);
-    addTags(d.tagsAdd, d.tagsRemove);
-    setTools(d.tools);
-    if (Object.prototype.hasOwnProperty.call(d, 'suggestTool')) suggestTool(d.suggestTool);
-    pushCards(d.guidance);
-  }
-
-  function toolContext() {
-    const s = Store.get();
-    return { user: userById(s.userId), transcript: s.transcript, state: s };
-  }
-
   function selectTool(id) {
     const tool = toolById(id);
     if (!tool) return;
-    const ctx = toolContext();
+    const prefill = Store.get().toolPrefill[id] || {};
     const inputs = {};
-    tool.inputs.forEach((f) => { inputs[f.key] = f.prefill ? (f.prefill(ctx) || '') : ''; });
+    tool.inputs.forEach((f) => { inputs[f.key] = prefill[f.key] || ''; });
     Store.set((st) => ({ selectedTool: id, toolInputs: inputs, toolResult: null, tab: 'guidance', suggestedTool: st.suggestedTool === id ? null : st.suggestedTool }));
   }
 
@@ -153,54 +117,73 @@
     const tool = toolById(id);
     if (!tool) return null;
     Store.set((st) => ({ selectedTool: id, toolInputs: inputs, toolResult: null, toolBusy: true, tab: 'guidance', suggestedTool: st.suggestedTool === id ? null : st.suggestedTool }));
-    await sleep(700);
-    const ctx = toolContext();
-    let r;
-    try { r = tool.run(inputs, ctx); } catch (e) { r = { output: { Error: String(e.message || e) } }; }
-    const output = Object.assign({}, r.output || {}, { demo_mode: 'true' });
-    const summary = Object.entries(r.output || {}).slice(0, 2).map(([k, v]) => `${k}: ${v}`).join(' · ');
+    const s = Store.get();
+    const res = await AI.simulateTool(tool, inputs, s, userById(s.userId));
+    if (res.fallback) notify(`Could not simulate ${tool.label}; showing its example output.${res.error ? ' ' + res.error : ''}`);
+    const output = res.output || { demo_mode: true };
+    const summary = Object.entries(output).filter(([k]) => k !== 'demo_mode').slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ');
     addLine('tool', `${tool.label} → ${summary}`);
-    Store.set((s) => ({ toolBusy: false, toolResult: output, toolRuns: s.toolRuns.concat([{ id: nextId(), tool: id, inputs, output, t: elapsed() }]) }));
-    if (r.stepsDone && r.stepsDone.length) {
-      const map = {}; r.stepsDone.forEach((sid) => { map[sid] = 'done'; });
-      setSteps(map);
-    }
-    if (r.tagsAdd) addTags(r.tagsAdd);
-    if (effectiveEngine(Store.get()) !== 'ai') pushCards(r.cards);   // with the model driving, it decides what the result means
-    return r;
+    Store.set((st) => ({ toolBusy: false, toolResult: output, toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, t: elapsed() }]) }));
+    return { output };
+  }
+
+  /* Workflows are matched by name and steps by position, so a status change can pulse. */
+  function mergeWorkflows(prev, incoming) {
+    const now = Date.now();
+    const groups = prev.slice();
+    incoming.forEach((wf) => {
+      if (!wf || !wf.name || !Array.isArray(wf.steps) || !wf.steps.length) return;
+      const steps = wf.steps.filter((st) => st && st.label).map((st) => ({ label: String(st.label).replace(/\.\s*$/, ''), status: STEP_STATUS.includes(st.status) ? st.status : 'pending' }));
+      const i = groups.findIndex((g) => g.title === wf.name);
+      if (i < 0) {
+        groups.push({ id: `wf${nextId()}`, title: String(wf.name), changed: now, steps: steps.map((st, n) => ({ id: `s${n}`, ...st })) });
+        return;
+      }
+      const old = groups[i];
+      groups[i] = { ...old, steps: steps.map((st, n) => {
+        const before = old.steps[n];
+        return before && before.status === st.status ? { ...before, label: st.label } : { id: `s${n}`, ...st, changed: now };
+      }) };
+    });
+    return groups;
   }
 
   function applyAnalysis(res) {
     if (!res || typeof res !== 'object') throw new Error('Empty analysis');
-    activateGroups(res.activeGroups || []);
-    if (Array.isArray(res.customGroups) && res.customGroups.length) {
-      Store.set((s) => {
-        let groups = s.groups;
-        res.customGroups.forEach((cg) => {
-          if (!cg || !cg.id || !cg.title || !Array.isArray(cg.steps) || !cg.steps.length) return;
-          const id = String(cg.id).toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
-          const steps = cg.steps.filter((st) => st && st.id && st.label).slice(0, 6).map((st) => ({ id: `${id}.${String(st.id)}`, label: String(st.label).slice(0, 80), status: ['done', 'pending', 'missed'].includes(st.status) ? st.status : 'pending' }));
-          const existing = groups.find((g) => g.id === id);
-          if (existing) {
-            groups = groups.map((g) => (g.id === id ? { ...g, active: true, steps: g.steps.map((old) => { const n = steps.find((x) => x.id === old.id); return n && n.status !== old.status ? { ...old, status: n.status, changed: Date.now() } : old; }).concat(steps.filter((n) => !g.steps.some((old) => old.id === n.id))) } : g));
-          } else {
-            groups = groups.concat([{ id, title: String(cg.title).slice(0, 40), active: true, custom: true, changed: Date.now(), steps }]);
-          }
-        });
-        return { groups };
-      });
-    }
-    const map = {};
-    (res.steps || []).forEach((st) => { if (st && st.id && ['done', 'pending', 'missed'].includes(st.status)) map[st.id] = st.status; });
-    setSteps(map);
-    if (Array.isArray(res.tags)) {
-      const tags = res.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 8);
-      Store.set({ tags });
-    }
-    setTools(res.tools);
-    suggestTool(typeof res.suggestedTool === 'string' ? res.suggestedTool.trim() : null);
-    const cards = (res.guidance || []).filter((c) => c && c.text && D.GUIDANCE_KINDS.includes(c.kind) && c.kind !== 'say').slice(0, 2);
+    const tools = (res.tools || []).filter((t) => t && toolById(t.name));
+    const prefill = {};
+    tools.forEach((t) => {
+      const values = {};
+      (t.inputs || []).forEach((f) => { if (f && f.name && typeof f.value === 'string') values[f.name] = f.value; });
+      prefill[t.name] = values;
+    });
+    const suggested = typeof res.suggestedTool === 'string' && toolById(res.suggestedTool.trim()) ? res.suggestedTool.trim() : null;
+    Store.set((s) => ({
+      groups: mergeWorkflows(s.groups, res.workflows || []),
+      tags: Array.isArray(res.tags) ? res.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 8) : s.tags,
+      tools: tools.length ? tools.map((t) => t.name) : s.tools,
+      toolPrefill: Object.assign({}, s.toolPrefill, prefill),
+      suggestedTool: suggested
+    }));
+    const cards = (res.guidance || []).filter((c) => c && c.text && AI.GUIDANCE_KINDS.includes(c.kind) && c.kind !== 'say').slice(0, 2);
     pushCards(cards);
+  }
+
+  /* Scripted playback stands in for the agent: run the tool the phone assist suggested, with its prefilled inputs. */
+  async function autoRunSuggestedTools() {
+    const ran = new Set();
+    for (let n = 0; n < MAX_AUTO_TOOLS_PER_TURN; n++) {
+      const s = Store.get();
+      const id = s.suggestedTool;
+      if (s.mode !== 'scripted' || s.callStatus !== 'active' || !id || ran.has(id)) return;
+      ran.add(id);
+      const tool = toolById(id);
+      const prefill = s.toolPrefill[id] || {};
+      const inputs = {};
+      tool.inputs.forEach((f) => { inputs[f.key] = prefill[f.key] || ''; });
+      await runTool(id, inputs);
+      await scheduleAnalysis();
+    }
   }
 
   let inFlight = null;
@@ -294,14 +277,12 @@
       addLine(turn.speaker, turn.text);
       Store.set({ scriptIndex: i + 1 });
       const speech = speakLine(turn.speaker, turn.text);
-      const d = turn.delta || {};
-      const engine = effectiveEngine(Store.get());
-      const toolRuns = d.tool ? (Array.isArray(d.tool) ? d.tool : [d.tool]) : [];
-      for (const t of toolRuns) await runTool(t.id, t.inputs);     // the agent's actions come first
-      if (engine === 'script') applyDelta(d);                       // then what the AI noticed
-      if (engine === 'ai') await scheduleAnalysis();
+      if (AI.available()) {
+        await scheduleAnalysis();
+        await autoRunSuggestedTools();
+      }
       const spoke = await speech;
-      if (d.end || i + 1 >= turns.length) Store.set({ callStatus: 'ended', autoplay: false });
+      if (i + 1 >= turns.length) Store.set({ callStatus: 'ended', autoplay: false });
       return { played: true, spoke: !!spoke };
     })();
     currentPlay = p;
@@ -392,15 +373,7 @@
   async function getBestReply() {
     const s = Store.get();
     if (s.callStatus === 'idle') { notify('Start the call first.'); return; }
-    if (effectiveEngine(s) === 'script') {
-      const sc = currentScenario();
-      const played = sc ? sc.turns.slice(0, s.scriptIndex).reverse() : [];
-      const turn = played.find((t) => t.delta && t.delta.bestReply);
-      if (!turn) { notify('No scripted best reply yet. Play a caller line first.'); return; }
-      pushCards([{ kind: 'say', text: turn.delta.bestReply, source: 'Best reply' }]);
-      return;
-    }
-    if (!AI.available()) { notify('OpenAI is not connected on this server, so a best reply cannot be generated.'); return; }
+    if (!AI.available()) { notify('No AI model is connected, so a best reply cannot be generated.'); return; }
     Store.set({ bestBusy: true, aiError: '' });
     try {
       const res = await AI.bestReply(Store.get(), userById(s.userId));
@@ -416,21 +389,16 @@
     const question = (q || '').trim();
     if (!question) return;
     const s = Store.get();
-    if (AI.available() && effectiveEngine(s) === 'ai') {
-      Store.set({ askBusy: true, aiError: '' });
-      try {
-        const res = await AI.ask(Store.get(), userById(s.userId), question);
-        pushCards([{ kind: 'answer', text: res.answer, source: res.source || `Q: ${question}` }]);
-      } catch (e) {
-        Store.set({ aiError: e.message || String(e) });
-      } finally {
-        Store.set({ askBusy: false });
-      }
-      return;
+    if (!AI.available()) { notify('No AI model is connected, so questions cannot be answered.'); return; }
+    Store.set({ askBusy: true, aiError: '' });
+    try {
+      const res = await AI.ask(Store.get(), userById(s.userId), question);
+      pushCards([{ kind: 'answer', text: res.answer, source: res.source || `Q: ${question}` }]);
+    } catch (e) {
+      Store.set({ aiError: e.message || String(e) });
+    } finally {
+      Store.set({ askBusy: false });
     }
-    const hit = D.CANNED_ANSWERS.find((c) => c.match.test(question));
-    if (hit) pushCards([{ kind: 'answer', text: hit.answer, source: hit.source }]);
-    else pushCards([{ kind: 'answer', text: 'In scripted mode I answer from the knowledge base only. Ask about coupons, transfers, early refills, flu shots, identity checks or prior authorization, or connect OpenAI on the local server for free-form questions.', source: `Q: ${question}` }]);
   }
 
   function updateSettings(patch) {
@@ -556,7 +524,7 @@
   }
 
   function Workflow({ s }) {
-    const groups = s.groups.filter((g) => g.active);
+    const groups = s.groups;
     return html`
       <div class="wf">
         <h2 class="panel-title">Workflow Steps</h2>
@@ -576,7 +544,7 @@
   }
 
   function ToolStrip({ s }) {
-    const ids = s.suggestedTool && !s.tools.includes(s.suggestedTool) ? [s.suggestedTool].concat(s.tools) : s.tools;
+    const ids = (s.suggestedTool && !s.tools.includes(s.suggestedTool) ? [s.suggestedTool].concat(s.tools) : s.tools).filter((id) => toolById(id));
     return html`
       <div class="tools">
         <div class="tools-label">Contextual tools${s.suggestedTool ? html`<span class="tools-hint"> · ${toolById(s.suggestedTool).label} is needed now</span>` : ''}</div>
@@ -651,7 +619,7 @@
 
   function ToolIO({ s }) {
     if (!s.selectedTool) {
-      return html`<div class="toolio-hint">Click a tool on the left to run it from this screen. Inputs are pre-filled from the customer record and the transcript.</div>`;
+      return html`<div class="toolio-hint">Click a tool on the left to run it from this screen. Inputs the assistant found in the call or the customer record are pre-filled; blank ones are yours to fill.</div>`;
     }
     const tool = toolById(s.selectedTool);
     const set = (k, v) => Store.set((st) => ({ toolInputs: Object.assign({}, st.toolInputs, { [k]: v }) }));
@@ -673,7 +641,7 @@
             </table>
           </div>
           <div class="io-actions">
-            <button class="btn-dark" disabled=${s.toolBusy || s.callStatus === 'idle'} onClick=${async () => { await runTool(s.selectedTool, Store.get().toolInputs); if (effectiveEngine(Store.get()) === 'ai') scheduleAnalysis(); }}>${s.toolBusy ? 'Running…' : 'Execute'}</button>
+            <button class="btn-dark" disabled=${s.toolBusy || s.callStatus === 'idle'} onClick=${async () => { await runTool(s.selectedTool, Store.get().toolInputs); scheduleAnalysis(); }}>${s.toolBusy ? 'Running…' : 'Execute'}</button>
             <button class="link" onClick=${() => Store.set({ selectedTool: null, toolResult: null })}>Close</button>
             ${s.callStatus === 'idle' ? html`<span class="io-note">Start a call to run tools.</span>` : ''}
           </div>
@@ -681,9 +649,9 @@
         <div class="io-col">
           <div class="io-label">Output:</div>
           <div class="io-out">
-            ${s.toolBusy ? html`<div class="io-wait">Calling ${tool.label}…</div>` : ''}
+            ${s.toolBusy ? html`<div class="io-wait">${tool.message || `Calling ${tool.label}`}…</div>` : ''}
             ${!s.toolBusy && s.toolResult ? Object.entries(s.toolResult).map(([k, v]) => html`
-              <div key=${k} class=${'io-row ' + (k === 'demo_mode' ? 'demo' : '')}><span class="io-k">${k}</span><span class="io-v">${String(v)}</span></div>`) : ''}
+              <div key=${k} class=${'io-row ' + (k === 'demo_mode' ? 'demo' : '')}><span class="io-k">${k}</span><span class="io-v">${fmtVal(v)}</span></div>`) : ''}
             ${!s.toolBusy && !s.toolResult ? html`<div class="io-wait">Press Execute to call the mock API.</div>` : ''}
           </div>
         </div>
@@ -787,7 +755,7 @@
             <p class="modal-help">${AI.server ? 'This server has no OpenAI key yet. Add OPENAI_API_KEY and ELEVENLABS_API_KEY to .env and restart. Scripted playback still works.' : 'No local server is running, so only scripted playback is available. From the project folder, run npm start and open http://localhost:8080.'}</p>
           `}
           <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the scripted call aloud</span></label>
-          <p class="modal-help">The panels update automatically after every line. Prompts live in the repository under prompts/ (analysis.md, best_reply.md, ask.md).</p>
+          <p class="modal-help">The panels update automatically after every line. Behavior comes from prompts/system_prompt.md, prompts/phone_assist.md, prompts/phone_assist_best_reply.md, prompts/chat.md, tools.md and kb/. Refresh the page after editing them.</p>
           <div class="modal-actions">
             <button class="btn-dark" onClick=${save}>Save</button>
             <button class="btn-plain" onClick=${runTest}>Test connection</button>
@@ -830,7 +798,11 @@
   /* ------------------------------------------------------------------ */
   /* Boot                                                                 */
   /* ------------------------------------------------------------------ */
-  AI.onChange((st) => { TTS.useServer(AI.hasVoice()); Store.set({ aiStatus: st }); });
+  AI.onChange((st) => {
+    TTS.useServer(AI.hasVoice());
+    const idle = Store.get().callStatus === 'idle';
+    Store.set(idle ? { aiStatus: st, tools: defaultTools(), selectedTool: null } : { aiStatus: st });
+  });
   AI.init(Store.get().settings);
   render(html`<${App} />`, document.getElementById('app'));
 

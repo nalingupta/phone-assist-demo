@@ -3,32 +3,28 @@
       The browser never holds the OpenAI or ElevenLabs key.
    2. "sample": the page runs inside a claude.ai artifact viewer and uses the
       viewer's own Claude access (no API key). That host cannot call OpenAI.
-   If neither is available the demo still runs on scripted deltas. */
+   Every prompt is assembled from the files: prompts/system_prompt.md plus one
+   personality file (phone_assist.md, phone_assist_best_reply.md or chat.md),
+   with tools.md, kb/*.md and the customer record attached as reference. */
 (function (global) {
   'use strict';
-  const D = global.DEMO;
+
+  const STEP_STATUS = ['pending', 'done', 'missed'];
+  const GUIDANCE_KINDS = ['say', 'ask', 'tell', 'info', 'do', 'recommendation', 'caution'];
 
   const ANALYSIS_SCHEMA = {
     type: 'object',
     properties: {
-      activeGroups: { type: 'array', items: { type: 'string' } },
-      customGroups: {
+      workflows: {
         type: 'array',
+        description: 'Every workflow shown on screen, in order, each with all of its steps.',
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string' }, title: { type: 'string' },
-            steps: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, label: { type: 'string' }, status: { type: 'string', enum: ['pending', 'done', 'missed'] } }, required: ['id', 'label', 'status'], additionalProperties: false } }
+            name: { type: 'string' },
+            steps: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, status: { type: 'string', enum: STEP_STATUS } }, required: ['label', 'status'], additionalProperties: false } }
           },
-          required: ['id', 'title', 'steps'], additionalProperties: false
-        }
-      },
-      steps: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pending', 'done', 'missed'] } },
-          required: ['id', 'status'], additionalProperties: false
+          required: ['name', 'steps'], additionalProperties: false
         }
       },
       tags: { type: 'array', items: { type: 'string' } },
@@ -37,7 +33,7 @@
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['say', 'ask', 'tell', 'info', 'do', 'recommendation', 'caution'] },
+            kind: { type: 'string', enum: GUIDANCE_KINDS },
             text: { type: 'string' },
             bullets: { type: 'array', items: { type: 'string' } },
             source: { type: 'string' }
@@ -45,10 +41,21 @@
           required: ['kind', 'text', 'bullets', 'source'], additionalProperties: false
         }
       },
-      tools: { type: 'array', items: { type: 'string' } },
-      suggestedTool: { type: 'string' }
+      tools: {
+        type: 'array',
+        description: 'Tools to highlight, most useful first, each with its inputs prefilled; value is "" when unknown.',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            inputs: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } }, required: ['name', 'value'], additionalProperties: false } }
+          },
+          required: ['name', 'inputs'], additionalProperties: false
+        }
+      },
+      suggestedTool: { type: 'string', description: 'Name of the one tool to run right now, or "".' }
     },
-    required: ['activeGroups', 'customGroups', 'steps', 'tags', 'guidance', 'tools', 'suggestedTool'],
+    required: ['workflows', 'tags', 'guidance', 'tools', 'suggestedTool'],
     additionalProperties: false
   };
   const REPLY_SCHEMA = {
@@ -63,17 +70,88 @@
   };
   const PING_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
 
-  /* ---------------- prompt pieces ---------------- */
-  function catalogText() {
-    const groups = D.SOP.map((g) => {
-      const steps = g.steps.map((s) => `    - ${s.id}: ${s.label}`).join('\n');
-      return `- ${g.id} "${g.title}"${g.always ? ' (always active)' : ''}. Trigger: ${g.when}\n${steps}`;
-    }).join('\n');
-    const tools = D.TOOLS.map((t) => `- ${t.id} "${t.label}": ${t.description}`).join('\n');
-    const kb = D.KB.map((k) => `### ${k.title}\n${k.text}`).join('\n\n');
-    return { groups, tools, kb };
+  /* ---------------- tools.md ---------------- */
+  const LABEL_WORDS = { otp: 'OTP', rx: 'Rx', id: 'ID', sms: 'SMS', url: 'URL', dob: 'DOB' };
+  function labelFor(name) {
+    const words = String(name).replace(/([a-z])([A-Z])/g, '$1_$2').split('_').filter(Boolean);
+    return words.map((w, i) => LABEL_WORDS[w.toLowerCase()] || (i === 0 ? w[0].toUpperCase() + w.slice(1) : w.toLowerCase())).join(' ');
+  }
+  const toolLabel = (name) => String(name).split('_').filter(Boolean).map((w) => LABEL_WORDS[w] || (w[0].toUpperCase() + w.slice(1))).join(' ');
+
+  const stripComments = (text) => String(text || '').replace(/<!--[\s\S]*?-->/g, '').trim();
+
+  function jsonObjectAt(text, start) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) return { raw: text.slice(start, i + 1), end: i + 1 };
+    }
+    return null;
   }
 
+  function withDemoMode(obj) {
+    if (!obj || typeof obj !== 'object') return { demo_mode: true };
+    if (Array.isArray(obj)) return { demo_mode: true, result: obj };
+    const rest = Object.assign({}, obj);
+    delete rest.demo_mode;
+    return Object.assign({ demo_mode: true }, rest);
+  }
+
+  /* Blocks look like: tool_name(\n  desc="...", input="a, b", message="...", dynamic=true\n) -> { example JSON } */
+  function parseTools(source) {
+    const text = stripComments(source);
+    const header = /^([A-Za-z_][A-Za-z0-9_]*)\(\s*\n([\s\S]*?)^\)\s*->\s*/gm;
+    const tools = [];
+    let m;
+    while ((m = header.exec(text))) {
+      const args = {};
+      for (const line of m[2].split('\n')) {
+        const a = line.match(/^\s*(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|true|false)\s*,?\s*$/);
+        if (!a) continue;
+        args[a[1]] = a[2] === 'true' ? true : a[2] === 'false' ? false : JSON.parse(a[2]);
+      }
+      const out = text[header.lastIndex] === '{' ? jsonObjectAt(text, header.lastIndex) : null;
+      let example = null;
+      if (out) {
+        try { example = JSON.parse(out.raw); } catch (e) { example = null; }
+        header.lastIndex = out.end;
+      }
+      tools.push({
+        id: m[1],
+        label: toolLabel(m[1]),
+        description: String(args.desc || ''),
+        message: String(args.message || ''),
+        dynamic: args.dynamic !== false,
+        inputs: String(args.input || '').split(',').map((s) => s.trim()).filter(Boolean).map((key) => ({ key, label: labelFor(key) })),
+        example: withDemoMode(example)
+      });
+    }
+    return tools;
+  }
+
+  /* Strict JSON schema shaped like a tool's example output, so a simulated result keeps its keys. */
+  function schemaFor(value) {
+    if (Array.isArray(value)) return { type: 'array', items: value.length ? schemaFor(value[0]) : { type: 'string' } };
+    if (value && typeof value === 'object') {
+      const keys = Object.keys(value);
+      const properties = {};
+      keys.forEach((k) => { properties[k] = schemaFor(value[k]); });
+      return { type: 'object', properties, required: keys, additionalProperties: false };
+    }
+    if (typeof value === 'boolean') return { type: 'boolean' };
+    if (typeof value === 'number') return { type: 'number' };
+    return { type: 'string' };
+  }
+
+  /* ---------------- prompt pieces ---------------- */
   function customerText(user) {
     if (!user) return 'No customer record selected.';
     const rx = user.prescriptions.map((p) => `  - Rx ${p.rx}: ${p.drug}, ${p.sig}, qty ${p.qty}/${p.days} days, ${p.refills} refills left, last fill ${p.lastFill}, prescriber ${p.prescriber}. Status: ${p.status}`).join('\n');
@@ -103,75 +181,45 @@
     }).join('\n');
   }
 
-  function stateText(state) {
-    const active = state.groups.filter((g) => g.active).map((g) => g.id).join(', ');
-    const steps = state.groups.filter((g) => g.active).flatMap((g) => g.steps.map((s) => `${s.id}=${s.status}`)).join(', ');
-    return `Active groups: ${active || 'none'}. Step statuses: ${steps || 'none'}. Tags: ${state.tags.join(', ') || 'none'}.`;
+  function toolRunsText(state) {
+    const runs = state.toolRuns || [];
+    if (!runs.length) return 'none';
+    return runs.map((r) => `${r.tool}(${JSON.stringify(r.inputs || {})}) -> ${JSON.stringify(r.output || {})}`).join('\n');
   }
 
-  const TEMPLATES = { analysis: null, best_reply: null, ask: null };   // filled from prompts/*.md when reachable
-
-  function fill(template, user) {
-    const c = catalogText();
-    return template
-      .replace(/\{\{groups\}\}/g, c.groups)
-      .replace(/\{\{tags\}\}/g, D.TAGS.join(', '))
-      .replace(/\{\{tools\}\}/g, c.tools)
-      .replace(/\{\{kb\}\}/g, c.kb)
-      .replace(/\{\{customer\}\}/g, customerText(user));
+  function screenText(state) {
+    const wf = state.groups.length
+      ? state.groups.map((g) => `- ${g.title}: ${g.steps.map((s, i) => `${i + 1}. ${s.label} [${s.status}]`).join('; ')}`).join('\n')
+      : '- none yet';
+    return `Workflows on screen:\n${wf}\nTags: ${state.tags.join(', ') || 'none'}.`;
   }
 
-  const DEFAULT_TEMPLATES = {
-    analysis: `You are the real-time Phone Assist analyst for a Walgreens pharmacy customer-support desk (a product demo with mock data). A human AGENT is on a live phone call with a CALLER. You read the transcript and keep the agent's screen current. Return one JSON object with keys activeGroups, customGroups, steps, tags, guidance, tools, suggestedTool. The screen starts blank; groups appear from the conversation; a step is done only after the agent performed it; guidance is at most one short card per event and usually none.
-
-# Workflow groups and steps
-{{groups}}
-
-# Tag vocabulary
-{{tags}}
-
-# Tools
-{{tools}}
-
-# Knowledge base
-{{kb}}
-
-# Customer record
-{{customer}}`,
-    best_reply: `You are the Phone Assist copilot for a pharmacy support AGENT on a live call. Write the single best next thing for the AGENT to say: 1 to 3 sentences, consistent with the knowledge base and customer record. Return JSON {reply, why}.
-
-# Knowledge base
-{{kb}}
-
-# Customer record
-{{customer}}`,
-    ask: `You are the Phone Assist copilot for a pharmacy support AGENT. Answer the agent's question in under 60 words from the knowledge base, the customer record and the call. Return JSON {answer, source}.
-
-# Knowledge base
-{{kb}}
-
-# Customer record
-{{customer}}`
-  };
-
-  async function loadTemplates() {
-    await Promise.all(Object.keys(TEMPLATES).map(async (name) => {
-      try {
-        const r = await fetch(`prompts/${name}.md`, { cache: 'no-cache' });
-        if (r.ok) { const t = await r.text(); if (t.trim()) TEMPLATES[name] = t; }
-      } catch (e) { /* file:// or offline: keep the embedded default */ }
-    }));
+  function kbText() {
+    const kb = AI.files.kb;
+    return kb.length ? kb.map((k) => `## ${k.file}\n${stripComments(k.text)}`).join('\n\n') : '(no knowledge-base files)';
   }
 
-  const analysisSystem = (user) => fill(TEMPLATES.analysis || DEFAULT_TEMPLATES.analysis, user);
-  const replySystem = (user) => fill(TEMPLATES.best_reply || DEFAULT_TEMPLATES.best_reply, user);
-  const askSystem = (user) => fill(TEMPLATES.ask || DEFAULT_TEMPLATES.ask, user);
+  /* system_prompt.md + one personality file, then the reference material. */
+  function buildSystem(personality, user) {
+    const p = AI.files.prompts;
+    return [
+      stripComments(p.system_prompt),
+      stripComments(p[personality]),
+      `# Tools (tools.md)\n${stripComments(AI.files.tools) || '(no tools)'}`,
+      `# Knowledge base (kb/)\n${kbText()}`,
+      `# Customer record (already looked up for this caller)\n${customerText(user)}`
+    ].filter(Boolean).join('\n\n---\n\n');
+  }
 
   /* ---------------- backends ---------------- */
+  const EMPTY_FILES = { prompts: {}, tools: '', kb: [] };
+
   const AI = {
     mode: 'none',          // 'server' | 'sample' | 'none'
     sample: null,
     server: null,          // /api/config answer when a demo server is behind this page
+    files: EMPTY_FILES,    // prompts/*.md, tools.md and kb/*.md
+    tools: [],             // tools parsed from tools.md
     settings: {},
     listeners: new Set(),
 
@@ -190,15 +238,30 @@
       this.emit();
     },
 
+    setFiles(files) {
+      this.files = {
+        prompts: (files && files.prompts) || {},
+        tools: (files && files.tools) || '',
+        kb: Array.isArray(files && files.kb) ? files.kb : []
+      };
+      this.tools = parseTools(this.files.tools);
+    },
+
     async init(settings) {
       this.settings = settings || {};
+      if (global.PROMPT_FILES) this.setFiles(global.PROMPT_FILES);   // inlined by build-artifact.sh
       this.recompute();
-      loadTemplates();
       if (!global.claude && /^https?:/.test(location.protocol)) {
         try {
           const r = await fetch('api/config', { cache: 'no-store' });
           if (r.ok) { const cfg = await r.json(); if (cfg && typeof cfg === 'object') this.server = cfg; }
         } catch (e) { this.server = null; }
+        if (this.server) {
+          try {
+            const r = await fetch('api/prompts', { cache: 'no-store' });
+            if (r.ok) this.setFiles(await r.json());
+          } catch (e) { /* keep whatever was inlined */ }
+        }
         this.recompute();
       }
       if (global.claude && typeof global.claude.use === 'function') {
@@ -222,9 +285,9 @@
         return { mode: 'server', label: `${model} connected` + (this.server.elevenlabs ? ' · ElevenLabs voices' : ' · browser voices') + (this.server.build && this.server.build.commit ? ` · build ${this.server.build.commit}` : '') };
       }
       if (this.mode === 'sample') return { mode: 'sample', label: 'Claude connected through this page (no key needed)' };
-      if (global.claude) return { mode: 'none', label: 'Claude not available in this viewer; scripted playback only' };
-      if (this.server) return { mode: 'none', label: 'Server has no OpenAI key yet; scripted playback only' };
-      return { mode: 'none', label: 'No AI service behind this page; scripted playback only' };
+      if (global.claude) return { mode: 'none', label: 'Claude not available in this viewer; the call plays without AI' };
+      if (this.server) return { mode: 'none', label: 'Server has no OpenAI key yet; the call plays without AI' };
+      return { mode: 'none', label: 'No AI service behind this page; the call plays without AI' };
     },
 
     async json({ system, user, schema, tier, effort, maxTokens, signal }) {
@@ -245,23 +308,48 @@
           throw new Error(sampleErrorText(e));
         }
       }
-      throw new Error('OpenAI is not connected on this server.');
+      throw new Error('No AI model is connected.');
     },
 
     analyze(state, user) {
       const shown = (state.guidance || []).slice(-8).map((c) => `- [${c.kind}] ${c.text}`).join('\n') || '- none';
-      const prompt = `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}\n\nScreen state before this update: ${stateText(state)}\n\nCards already on screen (do not repeat them):\n${shown}\n\nUpdate the screen for this moment. Return the JSON object.`;
-      return this.json({ system: analysisSystem(user), user: prompt, schema: ANALYSIS_SCHEMA, maxTokens: 8000 });
+      const prompt = [
+        `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}`,
+        `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
+        `Screen before this update:\n${screenText(state)}`,
+        `Cards already on screen (do not repeat them):\n${shown}`,
+        'Update the screen for this moment. Return the JSON object.'
+      ].join('\n\n');
+      return this.json({ system: buildSystem('phone_assist', user), user: prompt, schema: ANALYSIS_SCHEMA, maxTokens: 8000 });
     },
 
     bestReply(state, user) {
-      const prompt = `Call transcript so far:\n${transcriptText(state)}\n\n${stateText(state)}\n\nWrite the agent's best next reply. Return the JSON object.`;
-      return this.json({ system: replySystem(user), user: prompt, schema: REPLY_SCHEMA, maxTokens: 2000 });
+      const prompt = `Call transcript so far:\n${transcriptText(state)}\n\nTool calls so far:\n${toolRunsText(state)}\n\n${screenText(state)}\n\nWrite the agent's best next reply. Return the JSON object.`;
+      return this.json({ system: buildSystem('phone_assist_best_reply', user), user: prompt, schema: REPLY_SCHEMA, maxTokens: 2000 });
     },
 
     ask(state, user, question) {
-      const prompt = `Call transcript so far:\n${transcriptText(state)}\n\n${stateText(state)}\n\nThe agent asks: ${question}\n\nReturn the JSON object.`;
-      return this.json({ system: askSystem(user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
+      const prompt = `Call transcript so far:\n${transcriptText(state)}\n\nTool calls so far:\n${toolRunsText(state)}\n\n${screenText(state)}\n\nThe agent asks: ${question}\n\nReturn the JSON object.`;
+      return this.json({ system: buildSystem('chat', user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
+    },
+
+    /* Returns { output, simulated, fallback?, error? }. The example output is the fallback. */
+    async simulateTool(tool, inputs, state, user) {
+      if (!tool.dynamic) return { output: tool.example, simulated: false };
+      if (!this.available()) return { output: tool.example, simulated: false, fallback: true, error: 'No AI model is connected.' };
+      const prompt = [
+        `Simulate this tool call now.\nTool: ${tool.id}\nDescription: ${tool.description}\nInputs given: ${JSON.stringify(inputs || {})}`,
+        `Example output (the format to follow):\n${JSON.stringify(tool.example, null, 2)}`,
+        `Call transcript so far:\n${transcriptText(state)}`,
+        `Earlier tool calls in this call:\n${toolRunsText(state)}`,
+        'Return the JSON object this tool returns.'
+      ].join('\n\n');
+      try {
+        const out = await this.json({ system: buildSystem('phone_assist', user), user: prompt, schema: schemaFor(tool.example), maxTokens: 2000 });
+        return { output: withDemoMode(out), simulated: true };
+      } catch (e) {
+        return { output: tool.example, simulated: false, fallback: true, error: e.message || String(e) };
+      }
     },
 
     ping() {
@@ -281,5 +369,6 @@
     }
   }
 
+  AI.GUIDANCE_KINDS = GUIDANCE_KINDS;
   global.AI = AI;
 })(window);
