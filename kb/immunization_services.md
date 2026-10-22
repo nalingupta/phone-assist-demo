@@ -2,7 +2,9 @@
 
 <!-- Mock demo policy, not real Walgreens policy. -->
 
-Pharmacists give flu shots to patients aged 3 and up, by appointment or walk-in, during pharmacy hours. Most commercial plans and Medicare Part B cover the seasonal flu vaccine at no cost; confirm coverage from the vaccine eligibility check.
+Pharmacists give flu shots to patients aged 3 and up, by appointment or walk-in, during pharmacy hours. The 2026-27 flu season started September 1, 2026: a patient whose last flu shot was before that date is due. Appointments are every 15 minutes, and the last one is 30 minutes before the pharmacy closes.
+
+Most commercial plans and Medicare Part B cover the seasonal flu vaccine at no cost; confirm coverage from the vaccine eligibility check.
 
 A flu shot can be given at the same visit as a COVID-19 vaccine. Patients should bring an insurance card and photo ID. The immunization record is available in the app and sent to the state registry within 24 hours.
 

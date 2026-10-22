@@ -186,14 +186,18 @@
 
   function customerText(user) {
     if (!user) return 'No customer record selected.';
-    const rx = user.prescriptions.map((p) => `  - Rx ${p.rx}: ${p.drug}, ${p.sig}, qty ${p.qty}/${p.days} days, ${p.refills} refills left, last fill ${p.lastFill}, prescriber ${p.prescriber}. Status: ${p.status}`).join('\n');
+    const rx = user.prescriptions.map((p) => `  - Rx ${p.rx}: ${p.drug}, ${p.sig}, qty ${p.qty}/${p.days} days, ${p.refills} refills left, last fill ${p.lastFill}, prescriber ${p.prescriber}, plan copay ${p.copay30} per 30 days or ${p.copay90} per 90 days. Status: ${p.status}`).join('\n');
+    const other = (user.otherPharmacies || []).map((p) => `  - ${p.drug}, ${p.sig}, qty ${p.qty}/${p.days} days, at ${p.pharmacy}, prescriber ${p.prescriber}, plan copay ${p.copay30} per 30 days or ${p.copay90} per 90 days. ${p.note}`).join('\n');
+    const reps = (user.representatives || []).map((r) => `${r.name} (${r.relationship}; may handle: ${r.scope}; on file since ${r.since})`).join('; ');
     const imm = user.immunizations.length ? user.immunizations.map((i) => `${i.vaccine} on ${i.date}`).join('; ') : 'none on file';
     const past = user.interactions.map((i) => `${i.date} (${i.channel}): ${i.summary}`).join('; ');
     return [
-      `Name: ${user.name}; DOB ${user.dob}; phone ${user.phone}; email ${user.email}; preferred contact ${user.preferredContact}.`,
+      `Name: ${user.name}; DOB ${user.dob}; phone ${user.phone}; email ${user.email}; preferred contact ${user.preferredContact}; prescription text alerts: ${user.textAlerts || 'Not enrolled'}.`,
       `Preferred store: ${user.store.name} ${user.store.id}, ${user.store.address}, hours ${user.store.hours}.`,
-      `Insurance: ${user.insurance.plan}, member ${user.insurance.memberId}, status ${user.insurance.status}, copay ${user.insurance.copay30} per 30 days or ${user.insurance.copay90} per 90 days.`,
+      `Insurance: ${user.insurance.plan}, member ${user.insurance.memberId}, group ${user.insurance.group}, status ${user.insurance.status}.`,
       `Prescriptions (all on file at ${user.store.name} ${user.store.id}):\n${rx}`,
+      `Medications filled at other pharmacies (not on the Walgreens record yet):\n${other || '  - none'}`,
+      `Authorized representatives: ${reps || 'none on file'}.`,
       `Allergies: ${user.allergies.join(', ')}. Immunizations: ${imm}.`,
       `Previous interactions: ${past || 'none'}.`,
       `Notes: ${user.notes}`
@@ -493,29 +497,20 @@
       return this.json({ system: buildSystem('chat', user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
     },
 
-    /* Returns { output, summary?, simulated, fallback?, error? }. The example output is the fallback.
-       `summary` is the bullet list for `step`: this result compiled with the step's earlier ones. */
-    async simulateTool(tool, inputs, state, user, step) {
+    /* Returns { output, simulated, fallback?, error? }. The example output is the fallback. */
+    async simulateTool(tool, inputs, state, user) {
       if (!tool.dynamic) return { output: tool.example, simulated: false };
       if (!this.available()) return { output: tool.example, simulated: false, fallback: true, error: 'No AI model is connected.' };
-      const schema = {
-        type: 'object',
-        properties: { output: schemaFor(tool.example), summary: { type: 'array', items: { type: 'string' } } },
-        required: ['output', 'summary'], additionalProperties: false
-      };
-      const sameStep = step ? (state.toolRuns || []).filter((r) => r.step && r.step.stepId === step.stepId) : [];
       const prompt = [
         `Simulate this tool call now.\nTool: ${tool.id}\nDescription: ${tool.description}\nInputs given: ${JSON.stringify(inputs || {})}`,
         `Example output (the format to follow):\n${JSON.stringify(tool.example, null, 2)}`,
         `Call transcript so far:\n${transcriptText(state)}`,
         `Earlier tool calls in this call:\n${toolRunsText(state)}`,
-        `Workflow step this tool runs for: ${step ? `"${step.label}"` : '(none)'}\nEarlier tool calls in this step:\n${sameStep.length ? toolRunsText({ toolRuns: sameStep }) : 'none'}`,
-        'Return { "output": the JSON object this tool returns, "summary": the bullets compiling this result with the earlier tool calls in this step }.'
+        'Return the JSON object this tool returns.'
       ].join('\n\n');
       try {
-        const out = await this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema, maxTokens: 2500 });
-        const summary = (Array.isArray(out.summary) ? out.summary : []).map((b) => String(b || '').trim()).filter(Boolean).slice(0, 10);
-        return { output: withDemoMode(out.output), summary, simulated: true };
+        const out = await this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: schemaFor(tool.example), maxTokens: 2000 });
+        return { output: withDemoMode(out), simulated: true };
       } catch (e) {
         return { output: tool.example, simulated: false, fallback: true, error: e.message || String(e) };
       }

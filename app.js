@@ -45,7 +45,7 @@
       groups: [],
       unseenGuidance: 0,
       tags: [], guidance: [], batch: 0, toolPrefill: {},
-      feed: [], toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false, activeStep: null, stepSummary: null,
+      feed: [], toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false,
       scenarioId: null, turnCount: 0, nextSpeaker: 'agent', callerDone: false, agentFollowUp: false, autoplay: false, listening: null, speaking: null, callerThinking: false, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
     };
   }
@@ -119,23 +119,15 @@
     Store.set((s) => ({ feed: s.feed.map((r) => (r.id === id ? Object.assign({}, r, typeof patch === 'function' ? patch(r) : patch) : r)) }));
   }
   /* Simulates one call and records it in the transcript and the call's tool history. */
-  /* A run belongs to the step whose row it came from, or else to the step the agent started last.
-     The step's results summary at the top of Live Guidance is rebuilt from it. */
-  async function simulate(tool, inputs, step) {
+  async function simulate(tool, inputs) {
     const s = Store.get();
     const started = Date.now();
-    const res = await AI.simulateTool(tool, inputs, s, userById(s.userId), step);
+    const res = await AI.simulateTool(tool, inputs, s, userById(s.userId));
     if (res.fallback) notify(`Could not simulate ${tool.label}; showing its example output.${res.error ? ' ' + res.error : ''}`);
     const output = res.output || { demo_mode: true };
-    const entries = Object.entries(output).filter(([k]) => k !== 'demo_mode');
-    addLine('tool', `${tool.label} → ${entries.slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ')}`);
-    let bullets = res.summary && res.summary.length ? res.summary : null;
-    if (!bullets) {
-      const prev = s.stepSummary && step && s.stepSummary.stepId === step.stepId ? s.stepSummary.bullets : [];
-      bullets = prev.concat(entries.slice(0, 6).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${fmtVal(v)}`));
-    }
-    const stepSummary = { stepId: step ? step.stepId : null, title: step ? step.label : tool.label, bullets, t: elapsed() };
-    Store.set((st) => ({ toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, step, t: elapsed() }]), stepSummary }));
+    const brief = output.headline || Object.entries(output).filter(([k]) => k !== 'demo_mode').slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ');
+    addLine('tool', `${tool.label} → ${brief}`);
+    Store.set((st) => ({ toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, t: elapsed() }]) }));
     return { output, ms: Date.now() - started };
   }
 
@@ -151,9 +143,9 @@
       if (draft) {
         const inputs = Object.assign({}, draft.inputs);
         if (!draft.touched) Object.entries(filled).forEach(([k, v]) => { if (v) inputs[k] = v; });
-        return { feed: s.feed.map((r) => (r.id === draft.id ? Object.assign({}, r, { inputs, auto: auto === 'agent' ? 'agent' : r.auto, step: step || r.step }) : r)) };
+        return { feed: s.feed.map((r) => (r.id === draft.id ? Object.assign({}, r, { inputs, auto: auto === 'agent' ? 'agent' : r.auto, step: step || r.step, openedAt: Date.now() }) : r)) };
       }
-      return { feed: s.feed.concat([{ id: nextId(), type: 'manual', tool: id, by: 'agent', auto, step: step || null, touched: false, status: 'draft', inputs: filled }]) };
+      return { feed: s.feed.concat([{ id: nextId(), type: 'manual', tool: id, by: 'agent', auto, step: step || null, touched: false, status: 'draft', inputs: filled, openedAt: Date.now() }]) };
     });
   }
 
@@ -205,8 +197,8 @@
     if (!tool || row.status !== 'draft') return;
     updateRow(rowId, { status: 'running' });
     Store.set((s) => ({ suggestedTool: s.suggestedTool === tool.id ? null : s.suggestedTool }));
-    const { output, ms } = await simulate(tool, row.inputs, row.step || Store.get().activeStep);
-    updateRow(rowId, { status: 'done', output, ms });
+    const { output, ms } = await simulate(tool, row.inputs);
+    updateRow(rowId, { status: 'done', output, ms, ranAt: Date.now() });
     finishToolWait(tool.id, true);
     noteToolDone();
   }
@@ -346,7 +338,6 @@
     const ref = { groupId, stepId, workflow: g.title, label: g.steps[idx].label };
     const tool = AI.stepTools(g.title, idx).map(toolById).find(Boolean);
     updateWorkflowStep(groupId, stepId, { status: 'done', changed: Date.now() });
-    Store.set({ activeStep: ref });
     if (tool) {
       Store.set({ suggestedTool: tool.id, tab: 'guidance' });
       openDraft(tool.id, 'step', null, ref);
@@ -884,7 +875,6 @@
     const batches = [...byBatch.values()].sort((a, b) => a.batch - b.batch);
     const latest = batches.length ? batches[batches.length - 1].batch : 0;
     const cleared = batches.length > 0 && batches[batches.length - 1].cards.every((c) => c.retired);
-    const sum = s.callStatus !== 'idle' ? s.stepSummary : null;
     /* Keep only the newest guidance in view: older batches sit above, reachable by scrolling up.
        Once the newest no longer applies, it scrolls up too and the box is left empty. */
     useEffect(() => {
@@ -897,7 +887,7 @@
       if (spacer) spacer.style.height = `${Math.max(0, room)}px`;
       const top = cleared ? last.offsetTop + last.offsetHeight : last.offsetTop - lead;
       try { box.scrollTo({ top, behavior: batches.length > 1 || cleared ? 'smooth' : 'auto' }); } catch (e) { box.scrollTop = top; }
-    }, [latest, cleared, s.guidance.length, s.aiBusy, s.aiError, sum]);
+    }, [latest, cleared, s.guidance.length, s.aiBusy, s.aiError]);
     return html`
       <div class="guidance">
         <div class="tags">
@@ -905,11 +895,6 @@
           ${s.tags.length ? s.tags.map((t) => html`<span key=${t} class="tag">${t}</span>`) : html`<span class="tags-empty">none yet</span>`}
         </div>
         <div class="gpanel">
-        ${sum && sum.bullets.length ? html`
-          <div class="gsum" key=${sum.t + ':' + sum.title}>
-            <div class="gsum-title">Results · ${sum.title}</div>
-            <ul class="gsum-list">${sum.bullets.map((b, i) => html`<li key=${i}>${b}</li>`)}</ul>
-          </div>` : ''}
         <div class="gbox" ref=${boxRef}>
           ${batches.length
             ? batches.map((b, i) => html`
@@ -924,26 +909,6 @@
         </div>
         <${ActionFeed} s=${s} />
       </div>`;
-  }
-
-  const fmtMs = (ms) => (ms == null ? '' : `${(ms / 1000).toFixed(1)}s`);
-
-  function InputTable({ tool, inputs, editable, missing, onChange }) {
-    return html`
-      <table class="io-table">
-        ${tool.inputs.map((f) => html`
-          <tr key=${f.key} class=${(missing || []).includes(f.key) ? 'missing' : ''}>
-            <th>${f.label}${f.optional ? html`<span class="io-opt"> (optional)</span>` : ''}</th>
-            <td>${editable
-              ? html`<input type="text" value=${inputs[f.key] || ''} placeholder=${f.optional ? '' : 'Required'} onInput=${(e) => onChange(Object.assign({}, inputs, { [f.key]: e.target.value }))} />`
-              : html`<span class="io-val">${inputs[f.key] || '—'}</span>`}</td>
-          </tr>`)}
-      </table>`;
-  }
-
-  function OutputRows({ output }) {
-    return html`${Object.entries(output).map(([k, v]) => html`
-      <div key=${k} class=${'io-row ' + (k === 'demo_mode' ? 'demo' : '')}><span class="io-k">${k}</span><span class="io-v">${fmtVal(v)}</span></div>`)}`;
   }
 
   const emptyRequired = (tool, inputs) => tool.inputs.filter((f) => !f.optional && !String(inputs[f.key] || '').trim()).map((f) => f.key);
@@ -970,16 +935,14 @@
       </div>`;
   }
 
-  function ManualRow({ r, s }) {
+  function ManualRow({ r, s, latest }) {
     const tool = toolById(r.tool);
     if (!tool) return '';
-    if (r.status === 'done') {
-      return html`<div class="frow task single"><ul class="tsteps"><${DoneTool} st=${r} /></ul></div>`;
-    }
+    if (r.status === 'done') return html`<${ToolRun} r=${r} tool=${tool} latest=${latest} />`;
     return html`
       <div class="frow task single">
         <div class="fcell">
-          <div class="io-label">${tool.message || tool.label}</div>
+          <div class="run-head"><span class="run-title">${tool.message || tool.label}</span></div>
           <${Approval} tool=${tool} inputs=${r.inputs} running=${r.status === 'running'} disabled=${s.callStatus === 'idle'}
             onChange=${(inputs) => updateRow(r.id, { inputs, touched: true })}
             onRun=${async () => { const awaited = !!(toolWait && toolWait.tool === r.tool); await runManualRow(r.id); if (!awaited) settle(); }}
@@ -988,38 +951,65 @@
       </div>`;
   }
 
-  /* An executed tool: one line, with its inputs and output behind "Show details". */
-  function DoneTool({ st }) {
+  /* Output field names and values in plain words: "on_file_since" reads "On file since". */
+  const fieldLabel = (k) => {
+    const words = String(k).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').trim().toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  };
+  const readable = (v) => {
+    if (v == null || v === '') return '—';
+    if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+    if (Array.isArray(v)) return v.length ? v.map(readable).join('; ') : 'None';
+    if (typeof v === 'object') return Object.entries(v).map(([k, x]) => `${fieldLabel(k)}: ${readable(x)}`).join(' · ');
+    return String(v);
+  };
+
+  /* A run tool: the one run last shows its heading, Input and Output tabs and the output card; earlier
+     ones collapse to their heading, with the same view behind "Show details". */
+  function ToolRun({ r, tool, latest }) {
     const [open, setOpen] = useState(false);
-    const tool = toolById(st.tool);
-    if (!tool) return '';
+    const [tab, setTab] = useState('output');
+    const expanded = latest || open;
+    const out = r.output || {};
+    const rows = Object.entries(out).filter(([k]) => !['demo_mode', 'headline', 'note'].includes(k));
+    const card = tab === 'output'
+      ? html`
+        <div class="run-card">
+          ${out.headline ? html`<div class="run-headline">${out.headline}</div>` : ''}
+          ${rows.map(([k, v]) => html`<div key=${k} class="run-row"><span class="run-k">${fieldLabel(k)}</span><span class="run-v">${readable(v)}</span></div>`)}
+          ${out.note ? html`<div class="run-note">${out.note}</div>` : ''}
+        </div>`
+      : html`
+        <div class="run-card">
+          ${tool.inputs.map((f) => html`<div key=${f.key} class="run-row"><span class="run-k">${f.label}</span><span class="run-v">${readable(r.inputs[f.key])}</span></div>`)}
+        </div>`;
     return html`
-      <li class=${'tstep ' + st.status}>
-        <span class="tdot"></span>
-        <div class="tbody">
-          <div class="tsline">
-            <span>You ran ${tool.label}${st.step ? html` <span class="tstep-of">· ${st.step.label}</span>` : ''}</span>
-            ${st.status === 'done' ? html`<button class="link tshow" onClick=${() => setOpen(!open)}>${open ? 'Hide details ▴' : 'Show details ▾'}</button>` : ''}
-            ${st.ms != null ? html`<span class="dur">◷ ${fmtMs(st.ms)}</span>` : ''}
-          </div>
-          ${open && st.status === 'done' ? html`
-            <div class="tdetail">
-              <div><div class="io-label">Input:</div><div class="io-box"><${InputTable} tool=${tool} inputs=${st.inputs} editable=${false} /></div></div>
-              <div><div class="io-label">Output:</div><div class="io-out">${st.output ? html`<${OutputRows} output=${st.output} />` : ''}</div></div>
-            </div>` : ''}
+      <div class=${'frow run ' + (latest ? 'latest' : 'earlier')}>
+        <div class="run-head">
+          <span class="run-title">${tool.message || tool.label}</span>
+          ${latest ? '' : html`<button class="link run-show" onClick=${() => setOpen(!open)}>${open ? 'Hide details' : 'Show details'}</button>`}
         </div>
-      </li>`;
+        ${expanded ? html`
+          <div class="run-tabs">
+            <button class=${'run-tab ' + (tab === 'input' ? 'on' : '')} onClick=${() => setTab('input')}>Input</button>
+            <button class=${'run-tab ' + (tab === 'output' ? 'on' : '')} onClick=${() => setTab('output')}>Output</button>
+          </div>
+          ${card}` : ''}
+      </div>`;
   }
 
   function ActionFeed({ s }) {
     const boxRef = useRef(null);
-    useAutoScroll(boxRef, `${s.feed.length}`);
+    const lastRun = s.feed.reduce((best, r) => (r.status === 'done' && (!best || (r.ranAt || 0) > (best.ranAt || 0)) ? r : best), null);
+    /* The last run stays expanded only until a new tool row opens after it. */
+    const latestRun = lastRun && !s.feed.some((r) => r.status === 'draft' && (r.openedAt || 0) > (lastRun.ranAt || 0)) ? lastRun : null;
+    useAutoScroll(boxRef, `${s.feed.length}:${latestRun ? latestRun.id : ''}`);
     if (!s.feed.length) {
       return html`<div class="toolio-hint">Tools appear here when you start a workflow step with ▶. Fill in or check the inputs as the call goes on (what the call or the customer record already says is filled in for you), then run the tool or skip it. Nothing runs until you do.</div>`;
     }
     return html`
       <div class="feed" ref=${boxRef}>
-        ${s.feed.map((r) => html`<${ManualRow} key=${r.id} r=${r} s=${s} />`)}
+        ${s.feed.map((r) => html`<${ManualRow} key=${r.id} r=${r} s=${s} latest=${r === latestRun} />`)}
       </div>`;
   }
 
@@ -1039,15 +1029,27 @@
         </section>
         <section>
           <h3>Insurance</h3>
-          ${kv([['Plan', u.insurance.plan], ['Member ID', u.insurance.memberId], ['Group', u.insurance.group], ['Status', u.insurance.status], ['Copay', `${u.insurance.copay30} / 30 days · ${u.insurance.copay90} / 90 days`]])}
+          ${kv([['Plan', u.insurance.plan], ['Member ID', u.insurance.memberId], ['Group', u.insurance.group], ['Status', u.insurance.status]])}
+        </section>
+        <section>
+          <h3>Representatives and alerts</h3>
+          ${kv([['Authorized representatives', (u.representatives || []).length ? u.representatives.map((r) => `${r.name} (${r.relationship}, since ${r.since})`).join('; ') : 'None on file'], ['Text alerts', u.textAlerts || 'Not enrolled']])}
         </section>
         <section class="wide">
           <h3>Active prescriptions</h3>
           <table class="rx">
-            <thead><tr><th>Rx</th><th>Medication</th><th>Directions</th><th>Supply</th><th>Refills</th><th>Last fill</th><th>Status</th></tr></thead>
-            <tbody>${u.prescriptions.map((p) => html`<tr key=${p.rx}><td>${p.rx}</td><td>${p.drug}</td><td>${p.sig}</td><td>${p.qty} / ${p.days} days</td><td>${p.refills}</td><td>${p.lastFill}</td><td>${p.status}</td></tr>`)}</tbody>
+            <thead><tr><th>Rx</th><th>Medication</th><th>Directions</th><th>Supply</th><th>Refills</th><th>Last fill</th><th>Copay 30 / 90 days</th><th>Status</th></tr></thead>
+            <tbody>${u.prescriptions.map((p) => html`<tr key=${p.rx}><td>${p.rx}</td><td>${p.drug}</td><td>${p.sig}</td><td>${p.qty} / ${p.days} days</td><td>${p.refills}</td><td>${p.lastFill}</td><td>${p.copay30} / ${p.copay90}</td><td>${p.status}</td></tr>`)}</tbody>
           </table>
         </section>
+        ${(u.otherPharmacies || []).length ? html`
+          <section class="wide">
+            <h3>At other pharmacies</h3>
+            <table class="rx">
+              <thead><tr><th>Medication</th><th>Directions</th><th>Pharmacy</th><th>Copay 30 / 90 days</th><th>Note</th></tr></thead>
+              <tbody>${u.otherPharmacies.map((p) => html`<tr key=${p.drug}><td>${p.drug}</td><td>${p.sig}</td><td>${p.pharmacy}</td><td>${p.copay30} / ${p.copay90}</td><td>${p.note}</td></tr>`)}</tbody>
+            </table>
+          </section>` : ''}
         <section>
           <h3>Allergies and immunizations</h3>
           ${kv([['Allergies', u.allergies.join(', ')], ['Immunizations', u.immunizations.length ? u.immunizations.map((i) => `${i.vaccine} (${i.date})`).join('; ') : 'None on file']])}
