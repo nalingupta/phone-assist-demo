@@ -1,4 +1,4 @@
-# Transfer from CVS on Medicare, coupon question, 90-day supply and text notifications
+# Transfer from CVS on Medicare, coupon question, 90-day supply and text alerts
 
 customer: james
 
@@ -19,7 +19,7 @@ What you know, to give when asked:
 Your requests, in this order (bring up the next one only when the current one is settled):
 1. Moving the Eliquis from CVS to Lincoln Avenue. When the agent tells you when it will be ready, thank them and say you will pick it up then.
 2. Ask whether you can use the coupon card the Eliquis company mailed you, since it is getting expensive. If a cheaper option through your plan is offered (such as a 90-day supply), accept it.
-3. When the agent asks how you would like to be told about your prescriptions, say a text is fine, because your daughter Lauren helps you with those.
+3. Once the 90-day supply is set, ask whether the store could text you when your prescriptions are ready instead of calling, since you sometimes miss calls and your daughter Lauren helps you with texts. When the agent reads you the text alerts statement, say yes, you agree.
 4. When the agent offers a confirmation, a text is fine.
 
 Nothing else: no other medications, questions or problems.
@@ -30,8 +30,9 @@ No deliberate mistakes in this call: follow the guidance and the workflows.
 
 ## Happy path
 
-1. Verification: verify_identity (James Carter, 11/02/1957, (773) 555-0188), send_otp, verify_otp.
+1. Patient verification: find_patient (James Carter, 11/02/1957, (773) 555-0188) finds his record; send_otp to the phone on file, verify_otp.
 2. Prescription transfer: find_stores confirms Walgreens Lincoln Ave #2210; find_pharmacy finds CVS at 3101 N Clark St, (773) 555-0263; transfer_rx (Eliquis 5 mg, CVS, its phone, Lincoln Ave #2210, CVS Rx 33178802) is submitted, expected in 1 to 2 business days (by Monday 10/26).
-3. Cost and savings: check_savings_options shows the manufacturer coupon cannot be used with Medicare Part D, and the 90-day supply at $94 against $141 for three 30-day fills; James accepts the 90-day supply.
-4. Contact and fill preferences: update_patient_preferences sets contact by text and 90-day fills for Eliquis.
-5. Wrap-up: recap the transfer date and the 90-day supply, send_confirmation by SMS, log_summary.
+3. Cost and savings: check_savings_options shows the manufacturer coupon cannot be used with Medicare Part D, and the 90-day supply at $94 against $141 for three 30-day fills (the CVS prescription has 3 refills left, enough for it); James accepts the 90-day supply.
+4. Contact and fill preferences: update_patient_preferences sets 90-day fills for Eliquis; the contact channel is unchanged.
+5. Text alerts: get_disclosure returns the approved script from text_alerts.md for the number ending in 0188; the agent reads it word for word; James says yes; enroll_text_alerts.
+6. Wrap-up: recap the transfer date and the 90-day supply, send_confirmation by SMS, log_summary.

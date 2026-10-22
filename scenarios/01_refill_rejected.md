@@ -34,9 +34,9 @@ No deliberate mistakes in this call: follow the guidance and the workflows.
 
 ## Happy path
 
-1. Verification: verify_identity (Maria Lopez, 03/14/1981, (312) 555-0142), send_otp, verify_otp.
+1. Patient verification: find_patient (Maria Lopez, 03/14/1981, (312) 555-0142) finds her record; send_otp to the phone on file, verify_otp.
 2. Insurance rejection: lookup_rx finds atorvastatin Rx 7731-2208; check_insurance shows the 10/18 claim rejected with code 79 (refill too soon), covered from 10/19, so covered now; the agent explains it was a timing rejection.
-3. Cost and savings: Maria mentions the $30 copay; check_savings_options shows the 90-day supply at $45 against $90 for three 30-day fills; she takes the 90-day supply.
+3. Cost and savings: Maria mentions the $30 copay; check_savings_options shows the 90-day supply at $45 against $90 for three 30-day fills (5 refills left, enough for it); she takes the 90-day supply.
 4. Insurance rejection, step 4: rerun_claim as a 90-day supply; paid, $45, ready at Main St about 2 hours from now.
 5. Immunization: vaccine_slots at Main St (last flu shot 10/09/2025, so due; covered at no cost); book_appointment for the first slot after the ready time.
 6. Wrap-up: recap pickup and the flu shot time, send_confirmation by SMS, log_summary.

@@ -123,7 +123,7 @@ async function handleLlm(req, res) {
 }
 
 /* ---------------- prompt files ---------------- */
-const PROMPT_FILES = ['system_prompt', 'phone_assist_workflow', 'phone_assist_guidance', 'phone_assist_best_reply', 'chat', 'caller', 'support_agent'];
+const PROMPT_FILES = ['system_prompt', 'phone_assist_workflow', 'phone_assist_guidance', 'phone_assist_best_answer', 'chat', 'caller', 'support_agent'];
 
 function readText(rel) {
   try { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch (e) { return ''; }

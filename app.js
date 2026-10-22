@@ -45,7 +45,7 @@
       groups: [],
       unseenGuidance: 0,
       tags: [], guidance: [], batch: 0, toolPrefill: {},
-      feed: [], lastOpenedAt: 0, toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false,
+      feed: [], lastOpenedAt: 0, bestAnswer: null, askThread: [], toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false,
       scenarioId: null, turnCount: 0, nextSpeaker: 'agent', callerDone: false, agentFollowUp: false, autoplay: false, listening: null, speaking: null, callerThinking: false, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
     };
   }
@@ -90,11 +90,17 @@
   function addLine(speaker, text, spoken) {
     const line = { id: nextId(), speaker, text, t: elapsed() };
     if (spoken && willSpeak()) line.speaking = true;
-    Store.set((s) => ({ transcript: s.transcript.concat([line]) }));
+    /* A caller line, once heard, moves the question on: the Best Answer card no longer applies. */
+    const clears = speaker === 'caller' && !line.speaking;
+    Store.set((s) => Object.assign({ transcript: s.transcript.concat([line]) }, clears ? { bestAnswer: null } : {}));
     return line;
   }
   function lineHeard(id) {
-    Store.set((s) => ({ transcript: s.transcript.map((l) => (l.id === id && l.speaking ? Object.assign({}, l, { speaking: false }) : l)) }));
+    Store.set((s) => {
+      const line = s.transcript.find((l) => l.id === id && l.speaking);
+      if (!line) return {};
+      return Object.assign({ transcript: s.transcript.map((l) => (l === line ? Object.assign({}, l, { speaking: false }) : l)) }, line.speaker === 'caller' ? { bestAnswer: null } : {});
+    });
   }
 
   /* A guidance update: its card. */
@@ -124,8 +130,8 @@
     const started = Date.now();
     const res = await AI.simulateTool(tool, inputs, s, userById(s.userId));
     if (res.fallback) notify(`Could not simulate ${tool.label}; showing its example output.${res.error ? ' ' + res.error : ''}`);
-    const output = res.output || { demo_mode: true };
-    const brief = output.headline || Object.entries(output).filter(([k]) => k !== 'demo_mode').slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ');
+    const output = res.output || {};
+    const brief = output.headline || Object.entries(output).slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ');
     addLine('tool', `${tool.label} → ${brief}`);
     Store.set((st) => ({ toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, t: elapsed() }]) }));
     return { output, ms: Date.now() - started };
@@ -684,7 +690,9 @@
     Store.set({ bestBusy: true, aiError: '' });
     try {
       const res = await AI.bestReply(Store.get(), userById(s.userId));
-      pushCards([{ kind: 'say', text: res.reply, source: res.why ? `Best reply · ${res.why}` : 'Best reply' }]);
+      if (Store.get().callStart !== s.callStart) return;
+      const steps = (Array.isArray(res.steps) ? res.steps : []).map((x) => String(x || '').trim()).filter(Boolean).slice(0, 5);
+      Store.set({ bestAnswer: { id: nextId(), t: elapsed(), query: String(res.query_summary || '').trim(), reply: String(res.reply || '').trim(), steps } });
     } catch (e) {
       Store.set({ aiError: e.message || String(e) });
     } finally {
@@ -697,14 +705,18 @@
     if (!question) return;
     const s = Store.get();
     if (!AI.available()) { notify('No AI model is connected, so questions cannot be answered.'); return; }
-    Store.set({ askBusy: true, aiError: '' });
+    const id = nextId();
+    const patch = (p) => Store.set((st) => ({ askThread: st.askThread.map((x) => (x.id === id ? Object.assign({}, x, p) : x)) }));
+    Store.set((st) => ({ askBusy: true, askThread: st.askThread.concat([{ id, t: elapsed(), q: question, answer: '', bullets: [], source: '', pending: true, error: false }]) }));
     try {
       const res = await AI.ask(Store.get(), userById(s.userId), question);
-      pushCards([{ kind: 'answer', text: res.answer, source: res.source || `Q: ${question}` }]);
+      if (Store.get().callStart !== s.callStart) return;
+      const bullets = (Array.isArray(res.bullets) ? res.bullets : []).map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3);
+      patch({ answer: String(res.answer || '').trim(), bullets, source: String(res.source || '').trim(), pending: false });
     } catch (e) {
-      Store.set({ aiError: e.message || String(e) });
+      if (Store.get().callStart === s.callStart) patch({ pending: false, error: true });
     } finally {
-      Store.set({ askBusy: false });
+      if (Store.get().callStart === s.callStart) Store.set({ askBusy: false });
     }
   }
 
@@ -810,6 +822,45 @@
       </div>`;
   }
 
+  function BestAnswerCard({ b }) {
+    return html`
+      <div class="best" key=${b.id}>
+        <div class="best-head">
+          <span class="best-label">Best answer</span>
+          <button class="best-close" title="Dismiss" aria-label="Dismiss" onClick=${() => Store.set({ bestAnswer: null })}>×</button>
+        </div>
+        ${b.query ? html`<div class="best-query"><span>Caller is asking</span>${b.query}</div>` : ''}
+        <div class="best-reply">${b.reply}</div>
+        ${b.steps.length ? html`<ol class="best-steps">${b.steps.map((x, i) => html`<li key=${i}>${x}</li>`)}</ol>` : ''}
+      </div>`;
+  }
+
+  /* The agent's private chat with the copilot; the newest exchange stays in view, earlier ones scroll up. */
+  function AskThread({ items }) {
+    const ref = useRef(null);
+    const last = items[items.length - 1];
+    useAutoScroll(ref, `${items.length}:${last.pending}`);
+    return html`
+      <div class="askt">
+        <div class="best-head">
+          <span class="askt-label">Internal chat</span>
+          <button class="best-close" title="Clear the chat" aria-label="Clear the chat" onClick=${() => Store.set({ askThread: [] })}>×</button>
+        </div>
+        <div class="askt-list" ref=${ref}>
+          ${items.map((x) => html`
+            <div key=${x.id} class="askt-item">
+              <div class="askt-q">${x.q}</div>
+              ${x.pending ? html`<div class="askt-a muted">Thinking…</div>`
+                : x.error ? html`<div class="askt-a muted">Couldn't get an answer. Try asking again.</div>`
+                : html`
+                  <div class="askt-a">${x.answer}</div>
+                  ${x.bullets.length ? html`<ul class="askt-bullets">${x.bullets.map((b, i) => html`<li key=${i}>${b}</li>`)}</ul>` : ''}
+                  ${x.source ? html`<div class="askt-src">${x.source}</div>` : ''}`}
+            </div>`)}
+        </div>
+      </div>`;
+  }
+
   function GuidanceTab({ s }) {
     const boxRef = useRef(null);
     const lastRef = useRef(null);
@@ -836,6 +887,8 @@
       <div class="guidance">
         <div class="gcol">
         <div class="gpanel">
+        ${s.askThread.length ? html`<${AskThread} items=${s.askThread} />` : ''}
+        ${s.bestAnswer ? html`<${BestAnswerCard} b=${s.bestAnswer} />` : ''}
         <div class="gbox" ref=${boxRef}>
           ${batches.length
             ? batches.map((b, i) => html`
@@ -910,35 +963,45 @@
 
   /* A run tool: the one run last shows its heading, Input and Output tabs and the output card; earlier
      ones collapse to their heading, with the same view behind "Show details". */
+  /* Fields kept for the AIs but not shown to the agent (the caller reads the passcode back). */
+  const HIDDEN_OUTPUT = { send_otp: ['code'] };
+  const DEMO_WORD = /\b(demo|mock)\b/i;
+  const DEMO_KEY = /demo|mock|simulat/i;
+  const shownText = (v) => (typeof v === 'string' && DEMO_WORD.test(v) ? '' : v);
+
   function ToolRun({ r, tool, latest }) {
-    const [open, setOpen] = useState(false);
-    const [tab, setTab] = useState('output');
-    const expanded = latest || open;
+    const [tab, setTab] = useState(latest ? 'output' : null);
+    useEffect(() => { if (latest) setTab((x) => x || 'output'); else setTab(null); }, [latest]);
     const out = r.output || {};
-    const rows = Object.entries(out).filter(([k]) => !['demo_mode', 'headline', 'note'].includes(k));
+    const hidden = ['headline', 'note'].concat(HIDDEN_OUTPUT[tool.id] || []);
+    const rows = Object.entries(out).filter(([k, v]) => !hidden.includes(k) && !DEMO_KEY.test(k) && !DEMO_WORD.test(readable(v)));
+    const headline = shownText(out.headline);
+    const note = shownText(out.note);
+    const pick = (id) => setTab((x) => (x === id ? null : id));
     const card = tab === 'output'
       ? html`
         <div class="run-card">
-          ${out.headline ? html`<div class="run-headline">${out.headline}</div>` : ''}
-          ${rows.map(([k, v]) => html`<div key=${k} class="run-row"><span class="run-k">${fieldLabel(k)}</span><span class="run-v">${readable(v)}</span></div>`)}
-          ${out.note ? html`<div class="run-note">${out.note}</div>` : ''}
+          ${headline || note ? html`
+            <div class="run-top">
+              ${headline ? html`<div class="run-headline">${headline}</div>` : ''}
+              ${note ? html`<div class="run-note">${note}</div>` : ''}
+            </div>` : ''}
+          ${rows.length ? html`<div class="run-rows">${rows.map(([k, v]) => html`<div key=${k} class="run-row"><span class="run-k">${fieldLabel(k)}</span><span class="run-v">${readable(v)}</span></div>`)}</div>` : ''}
         </div>`
-      : html`
+      : tab === 'input' ? html`
         <div class="run-card">
-          ${tool.inputs.map((f) => html`<div key=${f.key} class="run-row"><span class="run-k">${f.label}</span><span class="run-v">${readable(r.inputs[f.key])}</span></div>`)}
-        </div>`;
+          <div class="run-rows">${tool.inputs.map((f) => html`<div key=${f.key} class="run-row"><span class="run-k">${f.label}</span><span class="run-v">${readable(r.inputs[f.key])}</span></div>`)}</div>
+        </div>` : '';
     return html`
       <div class=${'frow run ' + (latest ? 'latest' : 'earlier')}>
         <div class="run-head">
           <span class="run-title">${tool.message || tool.label}</span>
-          ${latest ? '' : html`<button class="link run-show" onClick=${() => setOpen(!open)}>${open ? 'Hide details' : 'Show details'}</button>`}
+          <span class="run-tabs">
+            <button class=${'run-tab ' + (tab === 'input' ? 'on' : '')} onClick=${() => pick('input')}>Input</button>
+            <button class=${'run-tab ' + (tab === 'output' ? 'on' : '')} onClick=${() => pick('output')}>Output</button>
+          </span>
         </div>
-        ${expanded ? html`
-          <div class="run-tabs">
-            <button class=${'run-tab ' + (tab === 'input' ? 'on' : '')} onClick=${() => setTab('input')}>Input</button>
-            <button class=${'run-tab ' + (tab === 'output' ? 'on' : '')} onClick=${() => setTab('output')}>Output</button>
-          </div>
-          ${card}` : ''}
+        ${card}
       </div>`;
   }
 
@@ -948,13 +1011,28 @@
     /* The last run stays expanded only until a new tool row opens after it, and stays collapsed
        while that row runs or after it is skipped. */
     const latestRun = lastRun && (lastRun.ranAt || 0) > (s.lastOpenedAt || 0) ? lastRun : null;
-    useAutoScroll(boxRef, `${s.feed.length}:${latestRun ? latestRun.id : ''}`);
+    /* The row with the newest activity (opened or finished last) sits at the top of the column;
+       earlier rows are scrolled up out of view, reachable by scrolling up. */
+    const focusIdx = s.feed.reduce((best, r, i) => (Math.max(r.openedAt || 0, r.ranAt || 0) >= best.at ? { i, at: Math.max(r.openedAt || 0, r.ranAt || 0) } : best), { i: -1, at: -1 }).i;
+    const focus = s.feed[focusIdx];
+    const spacerRef = useRef(null);
+    const seen = useRef(false);
+    useEffect(() => {
+      const box = boxRef.current; const spacer = spacerRef.current;
+      const el = box && box.children[focusIdx];
+      if (!el || !spacer) return;
+      spacer.style.height = `${Math.max(0, box.clientHeight - el.offsetHeight)}px`;
+      const behavior = seen.current ? 'smooth' : 'auto';
+      seen.current = true;
+      try { box.scrollTo({ top: el.offsetTop, behavior }); } catch (e) { box.scrollTop = el.offsetTop; }
+    }, [focus && focus.id, focus && focus.status, s.feed.length, latestRun && latestRun.id]);
     if (!s.feed.length) {
       return html`<div class="feed"><${EmptyIcon} name="tools" /></div>`;
     }
     return html`
       <div class="feed" ref=${boxRef}>
         ${s.feed.map((r) => html`<${ManualRow} key=${r.id} r=${r} s=${s} latest=${r === latestRun} />`)}
+        <div class="fspacer" ref=${spacerRef}></div>
       </div>`;
   }
 
@@ -1177,7 +1255,7 @@
           ` : html`
             <p class="modal-help">${AI.server ? 'This server has no OpenAI key yet. Add OPENAI_API_KEY and ELEVENLABS_API_KEY to .env and restart. Simulated calls need it.' : 'No local server is running, so no AI is available for simulated calls. From the project folder, run npm start and open http://localhost:8080.'}</p>
           `}
-          <p class="modal-help">The panels update automatically after every line. Behavior comes from prompts/system_prompt.md, prompts/phone_assist_workflow.md, prompts/phone_assist_guidance.md, prompts/phone_assist_best_reply.md, prompts/chat.md, tools.md and kb/. Refresh the page after editing them.</p>
+          <p class="modal-help">The panels update automatically after every line. Behavior comes from prompts/system_prompt.md, prompts/phone_assist_workflow.md, prompts/phone_assist_guidance.md, prompts/phone_assist_best_answer.md, prompts/chat.md, tools.md and kb/. Refresh the page after editing them.</p>
           <div class="modal-actions">
             <button class="btn-dark" onClick=${save}>Save</button>
             <button class="btn-plain" onClick=${runTest}>Test connection</button>

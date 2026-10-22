@@ -5,7 +5,7 @@
       viewer's own Claude access (no API key). That host cannot call OpenAI.
    Every prompt is assembled from the files: prompts/system_prompt.md plus one
    task file (phone_assist_workflow.md, phone_assist_guidance.md,
-   phone_assist_best_reply.md, chat.md or support_agent.md),
+   phone_assist_best_answer.md, chat.md or support_agent.md),
    with tools.md, kb/*.md and the customer record attached as reference.
    The simulated caller gets only caller.md and its scenarios/*.md section. */
 (function (global) {
@@ -84,13 +84,21 @@
 
   const REPLY_SCHEMA = {
     type: 'object',
-    properties: { reply: { type: 'string' }, why: { type: 'string' } },
-    required: ['reply', 'why'], additionalProperties: false
+    properties: {
+      query_summary: { type: 'string', description: "The caller's current question in one plain sentence." },
+      reply: { type: 'string', description: 'What the agent says now: the direct answer in one or two conversational sentences.' },
+      steps: { type: 'array', items: { type: 'string' }, description: "The covering workflow's next actions, in order, from where the call stands; [] when none." }
+    },
+    required: ['query_summary', 'reply', 'steps'], additionalProperties: false
   };
   const ANSWER_SCHEMA = {
     type: 'object',
-    properties: { answer: { type: 'string' }, source: { type: 'string' } },
-    required: ['answer', 'source'], additionalProperties: false
+    properties: {
+      answer: { type: 'string', description: "The direct answer to the agent's question, in one to three plain sentences." },
+      bullets: { type: 'array', items: { type: 'string' }, description: 'Up to three short supporting points (conditions, limits, exact values); [] when none.' },
+      source: { type: 'string' }
+    },
+    required: ['answer', 'bullets', 'source'], additionalProperties: false
   };
   const PING_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
 
@@ -121,12 +129,12 @@
     return null;
   }
 
-  function withDemoMode(obj) {
-    if (!obj || typeof obj !== 'object') return { demo_mode: true };
-    if (Array.isArray(obj)) return { demo_mode: true, result: obj };
-    const rest = Object.assign({}, obj);
-    delete rest.demo_mode;
-    return Object.assign({ demo_mode: true }, rest);
+  /* A tool result is always an object; fields naming the demo itself never reach the screen or the prompts. */
+  const DEMO_KEY = /demo|mock|simulat/i;
+  function toolOutput(obj) {
+    if (!obj || typeof obj !== 'object') return {};
+    if (Array.isArray(obj)) return { result: obj };
+    return Object.fromEntries(Object.entries(obj).filter(([k]) => !DEMO_KEY.test(k)));
   }
 
   /* Blocks look like: tool_name(\n  desc="...", input="a, b", message="...", dynamic=true\n) -> { example JSON } */
@@ -160,7 +168,7 @@
           const key = optional ? raw.slice(0, -1).trim() : raw;
           return { key, label: labelFor(key), optional };
         }),
-        example: withDemoMode(example)
+        example: toolOutput(example)
       });
     }
     return tools;
@@ -217,6 +225,12 @@
       `Allergies: ${user.allergies.join(', ')}.`,
       `Family members allowed to handle the patient's prescriptions: ${reps || 'none'}.`
     ].join('\n');
+  }
+
+  function bestAnswerText(state) {
+    const b = state.bestAnswer;
+    if (!b) return '(none)';
+    return `Caller is asking: ${b.query}\nReply: ${b.reply}${b.steps.length ? `\nSteps:\n${b.steps.map((x, i) => `  ${i + 1}. ${x}`).join('\n')}` : ''}`;
   }
 
   function scenarioHappyPath(state) {
@@ -326,7 +340,7 @@
     if (!sent.length) return '(no texts yet)';
     return sent.map((r) => {
       const o = r.output;
-      if (r.tool === 'send_otp') return `- Walgreens: your one-time passcode is ${o.code_demo_only || o.code || '(unreadable)'}.`;
+      if (r.tool === 'send_otp') return `- Walgreens: your one-time passcode is ${o.code || '(unreadable)'}.`;
       return `- ${o.channel || 'Message'}: ${o.message || 'Walgreens confirmation'}`;
     }).join('\n');
   }
@@ -497,6 +511,7 @@
         `Your screen:\n${screenText(state)}`,
         `Earlier guidance this call (oldest first, background only):\n${(state.guidance || []).slice(-6, -1).map((c) => `${fmtTime(c.t)} ${c.kind}: ${c.text}`).join('\n') || '(none)'}`,
         `Live Guidance card on screen:\n${cardText}`,
+        `Best Answer card on screen (the copilot's suggested reply to the caller's current question):\n${bestAnswerText(state)}`,
         `Tools only you can run:\n${humanTools}\n${suggested}`,
         `Your scenario notes:\n${scenario.agent || '(none)'}`,
         state.callerDone
@@ -509,12 +524,31 @@
     },
 
     bestReply(state, user) {
-      const prompt = `Call transcript so far:\n${transcriptText(state)}\n\nTool calls so far:\n${toolRunsText(state)}\n\n${screenText(state)}\n\nWrite the agent's best next reply. Return the JSON object.`;
-      return this.json({ system: buildSystem('phone_assist_best_reply', user), user: prompt, schema: REPLY_SCHEMA, maxTokens: 2000 });
+      const prompt = [
+        `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}`,
+        `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
+        `Agent's screen:\n${screenText(state)}`,
+        'The agent clicked Get Best Reply. Return the Best Answer card as the JSON object.'
+      ].join('\n\n');
+      return this.json({ system: buildSystem('phone_assist_best_answer', user), user: prompt, schema: REPLY_SCHEMA, maxTokens: 2000 });
     },
 
+    /* The agent's private chat: earlier exchanges are passed so follow-up questions keep their context. */
     ask(state, user, question) {
-      const prompt = `Call transcript so far:\n${transcriptText(state)}\n\nTool calls so far:\n${toolRunsText(state)}\n\n${screenText(state)}\n\nThe agent asks: ${question}\n\nReturn the JSON object.`;
+      const cards = state.guidance || [];
+      const card = cards.length && !cards[cards.length - 1].retired ? cards[cards.length - 1] : null;
+      const earlier = (state.askThread || []).filter((x) => x.answer)
+        .map((x) => `AGENT: ${x.q}\nYOU: ${x.answer}${x.bullets.length ? `\n${x.bullets.map((b) => `  - ${b}`).join('\n')}` : ''}`).join('\n\n');
+      const prompt = [
+        `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${state.callStatus === 'idle' && !state.transcript.length ? '(no call yet: the agent is preparing for this customer)' : transcriptText(state)}`,
+        `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
+        `Agent's screen:\n${screenText(state)}`,
+        `Live Guidance card on screen:\n${card ? `${card.kind}: ${card.text}` : '(none)'}`,
+        `Best Answer card on screen:\n${bestAnswerText(state)}`,
+        `Earlier in this private chat (oldest first):\n${earlier || '(none)'}`,
+        `The agent asks you privately: ${question}`,
+        'Return the JSON object.'
+      ].join('\n\n');
       return this.json({ system: buildSystem('chat', user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
     },
 
@@ -532,7 +566,7 @@
       ].join('\n\n');
       try {
         const out = await this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: schemaFor(tool.example), maxTokens: 2000 });
-        return { output: withDemoMode(out), simulated: true };
+        return { output: toolOutput(out), simulated: true };
       } catch (e) {
         return { output: tool.example, simulated: false, fallback: true, error: e.message || String(e) };
       }

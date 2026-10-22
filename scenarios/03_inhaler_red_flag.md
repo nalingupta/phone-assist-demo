@@ -28,7 +28,7 @@ No deliberate mistakes in this call: follow the guidance and the workflows.
 
 ## Happy path
 
-1. Verification: verify_identity (Priya Nair, 07/30/1994, (224) 555-0167), send_otp, verify_otp.
+1. Patient verification: find_patient (Priya Nair, 07/30/1994, (224) 555-0167) finds her record; send_otp to the phone on file, verify_otp.
 2. Refill request: lookup_rx finds albuterol Rx 8810-2217; check_insurance shows it covered now ($15 for 30 days); find_stores confirms Walgreens Davis St #5582; request_refill at Davis St, ready about 2 hours from now.
 3. Escalation: Priya describes using the inhaler 5 to 6 times a day with chest tightness; the agent does not advise, says a pharmacist will join, and runs page_pharmacist.
 4. Wrap-up while the pharmacist joins: recap the Davis St pickup time, send_confirmation by email, log_summary.

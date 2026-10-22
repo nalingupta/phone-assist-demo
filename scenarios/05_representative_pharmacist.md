@@ -29,8 +29,7 @@ No deliberate mistakes in this call: follow the guidance and the workflows.
 
 ## Happy path
 
-1. Authorized representative: verify_representative (patient James Carter, Lauren Carter, daughter) shows her on file since 03/02/2025 for refills, pickups and pharmacy questions.
-2. Verification of the patient: verify_identity (James Carter, 11/02/1957, (773) 555-0188), send_otp to James's phone, verify_otp with the code Lauren reads back.
+1. Representative verification: find_patient (James Carter, 11/02/1957, (773) 555-0188) finds James's record; verify_representative (patient James Carter, Lauren Carter, daughter) shows her on file since 03/02/2025 for refills, pickups and pharmacy questions; send_otp to James's phone, verify_otp with the code Lauren reads back.
 3. Refill request: lookup_rx finds lisinopril Rx 5520-9031; check_insurance shows it covered now (77 percent of the 90-day fill from 08/14 used; $20 for 90 days); find_stores confirms Walgreens Lincoln Ave #2210; request_refill for 90 days, ready today and held for 7 days.
 4. Escalation: the ibuprofen and Eliquis question is clinical; the agent does not answer it, says a pharmacist will join, and runs page_pharmacist.
 5. Wrap-up while the pharmacist joins: recap the pickup, send_confirmation by SMS to James's phone, log_summary.

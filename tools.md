@@ -28,7 +28,6 @@ verify_representative(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "patient": "<patient full name from the record>",
@@ -39,14 +38,13 @@ verify_representative(
     "on_file_since": "<MM/DD/YYYY from the record>"
 }
 
-verify_identity(
-    desc="Match the patient's full name, date of birth and phone number, as the caller states them, against the patient record. Another pharmacy's prescription number is not an identifier",
+find_patient(
+    desc="Find the patient's record by full name, date of birth and phone number, as the caller states them, and confirm all three match. Another pharmacy's prescription number is not an identifier",
     input="name, dob, phone",
-    message="Verifying identity",
+    message="Finding patient",
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "match": true,
@@ -56,18 +54,17 @@ verify_identity(
 }
 
 send_otp(
-    desc="Send a six-digit one-time passcode by SMS to the patient's phone number on file",
-    input="phone",
+    desc="Send a six-digit one-time passcode by SMS to the patient's phone number on file; it can only go to the number on file",
+    input="patient",
     message="Sending passcode",
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "sent": true,
     "to": "(***) ***-<last 4 digits of the phone on file>",
-    "code_demo_only": "<new random six-digit code>",
+    "code": "<new random six-digit code>",
     "expires_in": "5 minutes"
 }
 
@@ -78,7 +75,6 @@ verify_otp(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "verified": true,
@@ -92,7 +88,6 @@ lookup_rx(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "patient": "<patient full name>",
@@ -109,7 +104,6 @@ check_insurance(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "plan": "<plan name from the record>",
@@ -129,7 +123,6 @@ find_stores(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "location": "<street or ZIP code searched>",
@@ -145,7 +138,6 @@ request_refill(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "request": "Submitted",
@@ -164,7 +156,6 @@ rerun_claim(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "result": "Paid",
@@ -182,7 +173,6 @@ check_savings_options(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "drug": "<drug and strength>",
@@ -200,7 +190,6 @@ find_pharmacy(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "pharmacy": "<pharmacy name from the store directory>",
@@ -217,7 +206,6 @@ transfer_rx(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "request": "Submitted",
@@ -236,7 +224,6 @@ vaccine_slots(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "vaccine": "<vaccine>",
@@ -254,7 +241,6 @@ book_appointment(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "confirmation": "<confirmation number>",
@@ -270,7 +256,6 @@ get_disclosure(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "topic": "<disclosure topic>",
@@ -285,7 +270,6 @@ enroll_text_alerts(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "enrolled": true,
@@ -302,7 +286,6 @@ update_patient_preferences(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "patient": "<patient full name>",
@@ -319,7 +302,6 @@ page_pharmacist(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "status": "Pharmacist paged",
@@ -335,7 +317,6 @@ send_confirmation(
     dynamic=true,
     auto_approved=false
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "sent": true,
@@ -351,7 +332,6 @@ log_summary(
     dynamic=true,
     auto_approved=true
 ) -> {
-    "demo_mode": true,
     "headline": "<the result in 3 to 6 plain words>",
     "note": "<one plain sentence on what this result means, from this result only>",
     "logged": true,

@@ -24,7 +24,7 @@
       store: { id: '#4471', name: 'Walgreens Main St', address: '1601 Main St, Evanston, IL 60201', phone: '(847) 555-0199', hours: '8 AM to 10 PM' },
       insurance: { plan: 'BlueCross BlueShield PPO', memberId: 'XYZ-4471-8820', group: 'GRP-10422', status: 'Active' },
       prescriptions: [
-        { rx: '7731-2208', drug: 'Atorvastatin 20 mg tablet', sig: '1 tablet daily', qty: 30, days: 30, refills: 2, lastFill: '09/26/2026', prescriber: 'Dr. Anita Rao', copay30: '$30.00', copay90: '$45.00', status: 'Refill requested in the app 10/18; claim rejected 10/18, code 79 (refill too soon)' },
+        { rx: '7731-2208', drug: 'Atorvastatin 20 mg tablet', sig: '1 tablet daily', qty: 30, days: 30, refills: 5, lastFill: '09/26/2026', prescriber: 'Dr. Anita Rao', copay30: '$30.00', copay90: '$45.00', status: 'Refill requested in the app 10/18; claim rejected 10/18, code 79 (refill too soon)' },
         { rx: '7731-1194', drug: 'Metformin 500 mg tablet', sig: '1 tablet twice daily', qty: 60, days: 30, refills: 5, lastFill: '09/26/2026', prescriber: 'Dr. Anita Rao', copay30: '$5.00', copay90: '$10.00', status: 'Active' }
       ],
       otherPharmacies: [],
@@ -56,7 +56,7 @@
         { rx: '5520-9031', drug: 'Lisinopril 20 mg tablet', sig: '1 tablet daily', qty: 90, days: 90, refills: 1, lastFill: '08/14/2026', prescriber: 'Dr. Howard Lin', copay30: '$10.00', copay90: '$20.00', status: 'Active' }
       ],
       otherPharmacies: [
-        { drug: 'Eliquis (apixaban) 5 mg tablet', sig: '1 tablet twice daily', qty: 60, days: 30, pharmacy: 'CVS Pharmacy, N Clark St at Belmont Ave, Chicago', prescriber: 'Dr. Howard Lin', copay30: '$47.00', copay90: '$94.00', note: 'Not yet transferred. CVS Rx number not on file.' }
+        { drug: 'Eliquis (apixaban) 5 mg tablet', sig: '1 tablet twice daily', qty: 60, days: 30, pharmacy: 'CVS Pharmacy, N Clark St at Belmont Ave, Chicago', prescriber: 'Dr. Howard Lin', copay30: '$47.00', copay90: '$94.00', note: '3 refills left at CVS. Not yet transferred. CVS Rx number not on file.' }
       ],
       representatives: [
         { name: 'Lauren Carter', relationship: 'Daughter', scope: 'Refills, pickups and pharmacy questions', since: '03/02/2025' }

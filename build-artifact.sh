@@ -12,7 +12,7 @@ prompt_files() {
     const fs = require("fs");
     const read = (f) => { try { return fs.readFileSync(f, "utf8"); } catch (e) { return ""; } };
     const prompts = {};
-    for (const n of ["system_prompt", "phone_assist_workflow", "phone_assist_guidance", "phone_assist_best_reply", "chat", "caller", "support_agent"]) prompts[n] = read(`prompts/${n}.md`);
+    for (const n of ["system_prompt", "phone_assist_workflow", "phone_assist_guidance", "phone_assist_best_answer", "chat", "caller", "support_agent"]) prompts[n] = read(`prompts/${n}.md`);
     const folder = (d) => fs.readdirSync(d).filter((f) => f.endsWith(".md")).sort().map((file) => ({ file, text: read(`${d}/${file}`) }));
     const json = JSON.stringify({ prompts, tools: read("tools.md"), kb: folder("kb"), scenarios: folder("scenarios") }).replace(/</g, "\\u003c");
     process.stdout.write(`window.PROMPT_FILES = ${json};`);

@@ -27,7 +27,7 @@ No deliberate mistakes in this call: follow the guidance and the workflows.
 
 ## Happy path
 
-1. Verification: verify_identity (Maria Lopez, 03/14/1981, (312) 555-0142), send_otp, verify_otp.
+1. Patient verification: find_patient (Maria Lopez, 03/14/1981, (312) 555-0142) finds her record; send_otp to the phone on file, verify_otp.
 2. Refill request: lookup_rx finds metformin Rx 7731-1194; check_insurance shows it covered now ($5 for 30 days); find_stores confirms Walgreens Davis St #5582; request_refill at Davis St for 30 days, ready today and held for 7 days, so it is there Friday.
 3. Text alerts: get_disclosure returns the approved script from text_alerts.md; the agent reads it word for word; Maria says yes; enroll_text_alerts.
 4. Wrap-up: recap the Davis St pickup, send_confirmation by SMS, log_summary.
