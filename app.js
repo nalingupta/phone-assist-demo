@@ -11,7 +11,7 @@
   /* Settings                                                            */
   /* ------------------------------------------------------------------ */
   const SETTINGS_KEY = 'phoneAssistDemo.settings.v2';
-  const DEFAULT_SETTINGS = { apiKey: '', model: 'gpt-5.6-luna', effort: 'low', baseUrl: '', tier: 'quick', audio: true };
+  const DEFAULT_SETTINGS = { apiKey: '', model: 'gpt-5.6-luna', effort: 'low', baseUrl: '', tier: 'quick' };
   function loadSettings() {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
@@ -45,14 +45,14 @@
       groups: [],
       unseenGuidance: 0,
       tags: [], guidance: [], batch: 0, toolPrefill: {},
-      feed: [], toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false,
+      feed: [], lastOpenedAt: 0, toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false,
       scenarioId: null, turnCount: 0, nextSpeaker: 'agent', callerDone: false, agentFollowUp: false, autoplay: false, listening: null, speaking: null, callerThinking: false, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
     };
   }
 
   const Store = (() => {
     let state = Object.assign(freshCall(), {
-      userId: pickRandom(D.USERS).id, scenarioPick: 'random', mode: 'simulated', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
+      userId: pickRandom(D.USERS).id, scenarioPick: 'random', mode: 'live', incoming: null, tab: 'guidance', settings: loadSettings(), settingsOpen: false,
       aiStatus: AI.status(), notice: '', voiceError: ''
     });
     const subs = new Set();
@@ -143,9 +143,9 @@
       if (draft) {
         const inputs = Object.assign({}, draft.inputs);
         if (!draft.touched) Object.entries(filled).forEach(([k, v]) => { if (v) inputs[k] = v; });
-        return { feed: s.feed.map((r) => (r.id === draft.id ? Object.assign({}, r, { inputs, auto: auto === 'agent' ? 'agent' : r.auto, step: step || r.step, openedAt: Date.now() }) : r)) };
+        return { feed: s.feed.map((r) => (r.id === draft.id ? Object.assign({}, r, { inputs, auto: auto === 'agent' ? 'agent' : r.auto, step: step || r.step, openedAt: Date.now() }) : r)), lastOpenedAt: Date.now() };
       }
-      return { feed: s.feed.concat([{ id: nextId(), type: 'manual', tool: id, by: 'agent', auto, step: step || null, touched: false, status: 'draft', inputs: filled, openedAt: Date.now() }]) };
+      return { feed: s.feed.concat([{ id: nextId(), type: 'manual', tool: id, by: 'agent', auto, step: step || null, touched: false, status: 'draft', inputs: filled, openedAt: Date.now() }]), lastOpenedAt: Date.now() };
     });
   }
 
@@ -177,7 +177,7 @@
     finishToolWait(null, false);
     const values = {};
     (inputs || []).forEach((f) => { if (f && f.name && String(f.value || '').trim()) values[f.name] = String(f.value); });
-    Store.set({ agentRequest: { tool: tool.id, inputs: values }, tab: 'guidance' });
+    Store.set({ agentRequest: { tool: tool.id, inputs: values } });
     const running = Store.get().feed.some((r) => r.type === 'manual' && r.tool === tool.id && r.status === 'running');
     if (!running) openDraft(tool.id, 'agent', values);
     return new Promise((resolve) => { toolWait = { tool: tool.id, resolve }; });
@@ -339,7 +339,7 @@
     const tool = AI.stepTools(g.title, idx).map(toolById).find(Boolean);
     updateWorkflowStep(groupId, stepId, { status: 'done', changed: Date.now() });
     if (tool) {
-      Store.set({ suggestedTool: tool.id, tab: 'guidance' });
+      Store.set({ suggestedTool: tool.id });
       openDraft(tool.id, 'step', null, ref);
     } else {
       noteToolDone();   // a step without a tool has nothing to wait for
@@ -371,7 +371,6 @@
 
   function startCall(opts) {
     opts = opts || {};
-    const autoFirst = opts.autoFirst !== false;
     stopVoice();
     TTS.cancel();
     releaseWaits();
@@ -381,13 +380,14 @@
     const pick = opts.scenarioId || (s.scenarioPick !== 'random' ? s.scenarioPick : null);
     const sc = (pick && scenarioById(pick)) || pickRandom(AI.scenarios, lastScenarioId);
     lastScenarioId = sc.id;
-    Store.set(Object.assign(freshCall(), { userId: userById(sc.customer).id, scenarioId: sc.id, callStatus: 'active', callStart: Date.now(), tab: 'customer', aiStatus: AI.status() }));
+    Store.set(Object.assign(freshCall(), { userId: userById(sc.customer).id, scenarioId: sc.id, callStatus: 'active', callStart: Date.now(), incoming: null, aiStatus: AI.status() }));
     if (s.mode === 'simulated') {
-      if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().turnCount === 0) playNext(); }, 0);
+      Store.set({ autoplay: true });
+      setTimeout(() => { if (Store.get().callStatus === 'active') autoplayLoop(); }, 0);
     } else if (recognizer.supported) {
       toggleMic();   // the agent greets the caller first
     } else {
-      notify('Voice input needs Chrome or Edge. Type your lines in the box instead.');
+      notify('Live call needs Chrome or Edge for speech recognition.');
     }
   }
 
@@ -402,10 +402,10 @@
     stopVoice();
     TTS.cancel();
     releaseWaits();
-    Store.set(Object.assign(freshCall(), { tab: 'guidance', notice: '' }));
+    Store.set(Object.assign(freshCall(), { tab: 'guidance', notice: '', mode: 'live', incoming: null }));
   }
 
-  function willSpeak() { return !!(Store.get().settings.audio && TTS.supported); }
+  function willSpeak() { return !!TTS.supported; }
   async function speakLine(speaker, line) {
     if (!willSpeak()) { lineHeard(line.id); return false; }
     Store.set({ speaking: speaker });
@@ -437,7 +437,7 @@
       } else {
         const draft = callerDraft && callerDraft.callStart === callStart && callerDraft.turn === s.turnCount ? callerDraft.promise : null;
         callerDraft = null;
-        res = (draft && await draft) || await AI.callerTurn(s, sc);
+        res = (draft && await draft) || await AI.callerTurn(s, sc, userById(s.userId));
       }
     } catch (e) {
       Store.set({ aiError: e.message || String(e), autoplay: false });
@@ -468,7 +468,7 @@
     if (!say && !(speaker === 'agent' && res.tool)) return { played: true };
     if (speaker === 'agent' && say) {
       const after = Store.get();
-      callerDraft = { callStart, turn: after.turnCount, promise: AI.callerTurn(after, sc).catch(() => null) };
+      callerDraft = { callStart, turn: after.turnCount, promise: AI.callerTurn(after, sc, userById(after.userId)).catch(() => null) };
     }
     const handOver = speaker === 'agent' && !!say && !!res.hand_over;
     await settle();
@@ -502,37 +502,59 @@
     try { return await p; } finally { if (currentPlay === p) currentPlay = null; }
   }
 
+  /* One loop at a time: a Resume while the paused loop is still finishing its turn lets that loop go on. */
+  let looping = false;
   async function autoplayLoop() {
-    if (currentPlay) await currentPlay;
-    while (Store.get().autoplay && Store.get().callStatus === 'active') {
-      const res = await playNext();
-      if (!res || !res.played) break;
+    if (looping) return;
+    looping = true;
+    try {
+      if (currentPlay) await currentPlay;
+      while (Store.get().autoplay && Store.get().callStatus === 'active') {
+        const res = await playNext();
+        if (!res || !res.played) break;
+      }
+    } finally {
+      looping = false;
+      Store.set({ autoplay: false });
     }
-    Store.set({ autoplay: false });
   }
 
+  /* Simulated call: Pause lets the line being spoken finish; Resume carries on from there. */
   function toggleAutoplay() {
     const s = Store.get();
+    if (s.callStatus !== 'active') return;
     if (s.autoplay) { Store.set({ autoplay: false }); return; }
-    if (s.callStatus !== 'active' && startCall({ autoFirst: false }) === false) return;
     Store.set({ autoplay: true });
     autoplayLoop();
   }
 
+  /* Picking a mode only selects it; Start call rings, and accepting the incoming call starts it. */
   function setMode(mode) {
-    stopVoice();
-    TTS.cancel();
     const s = Store.get();
-    if (s.mode === mode) return;
-    releaseWaits();
-    Store.set(Object.assign(freshCall(), { mode }));
+    if (s.callStatus === 'active' || s.incoming) return;
+    Store.set({ mode });
   }
+
+  function ringCall() {
+    const s = Store.get();
+    if (s.callStatus === 'active' || s.incoming) return;
+    if (!AI.available()) { notify('This call needs an AI model: the caller is played by it.'); return; }
+    if (!AI.scenarios.length) { notify('No scenarios found in scenarios/.'); return; }
+    const sc = (s.scenarioPick !== 'random' && scenarioById(s.scenarioPick)) || pickRandom(AI.scenarios, lastScenarioId);
+    lastScenarioId = sc.id;
+    Store.set({ incoming: { scenarioId: sc.id, userId: userById(sc.customer).id } });
+  }
+  function acceptCall() {
+    const inc = Store.get().incoming;
+    if (inc) startCall({ scenarioId: inc.scenarioId });
+  }
+  function declineCall() { Store.set({ incoming: null }); }
 
   /* ------------------------------------------------------------------ */
   /* Voice input                                                          */
   /* ------------------------------------------------------------------ */
   /* Live call: the human is the support agent on the mic and the caller AI answers each turn.
-     The agent's turn ends after TURN_END_MS of silence (or "Done speaking"); the mic pauses while
+     The agent's turn ends after TURN_END_MS of silence (or on Pause); the mic pauses while
      the caller's voice plays so it does not transcribe the caller. */
   const TURN_END_MS = 1500;
   let agentBuffer = [];      // finished pieces of the line the agent is speaking
@@ -616,7 +638,7 @@
     callerReply = token;
     Store.set({ callerThinking: true });
     let res;
-    try { res = await AI.callerTurn(s, sc); }
+    try { res = await AI.callerTurn(s, sc, userById(s.userId)); }
     catch (e) {
       if (callerReply === token) { callerReply = null; Store.set({ callerThinking: false, aiError: e.message || String(e) }); }
       return;
@@ -638,8 +660,8 @@
   /* Live call: mute or unmute the agent's mic; muting sends what was already said. */
   function toggleMic() {
     const s = Store.get();
-    if (s.callStatus !== 'active') { notify('Start the call first.'); return; }
-    if (!recognizer.supported) { notify('Voice input needs Chrome or Edge. Type a line instead.'); return; }
+    if (s.callStatus !== 'active') return;
+    if (!recognizer.supported) { notify('Live call needs Chrome or Edge for speech recognition.'); return; }
     if (s.listening === 'agent') {
       commitAgentTurn();
       micPaused = false;
@@ -650,14 +672,6 @@
     Store.set({ listening: 'agent', voiceError: '' });
     if (s.speaking === 'caller') micPaused = true;   // starts when the caller finishes
     else if (!recognizer.listening) recognizer.start();
-  }
-
-  function speakAs(speaker) {
-    const s = Store.get();
-    if (s.callStatus !== 'active') { notify('Start the call first.'); return; }
-    if (s.autoplay) return;
-    if (s.nextSpeaker !== speaker) { notify(`The next turn belongs to the ${s.nextSpeaker === 'caller' ? 'caller' : 'support agent'}.`); return; }
-    playNext();
   }
 
   /* ------------------------------------------------------------------ */
@@ -698,7 +712,6 @@
     const settings = Object.assign({}, Store.get().settings, patch);
     saveSettings(settings);
     AI.configure(settings);
-    if (patch.audio === false) TTS.cancel();
     Store.set({ settings, aiStatus: AI.status() });
   }
 
@@ -719,129 +732,61 @@
     }, [key]);
   }
 
-  function StatusPill({ s }) {
-    const [, tick] = useState(0);
-    useEffect(() => { const id = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(id); }, []);
-    let text = 'Ready';
-    let cls = 'pill';
-    if (s.callStatus === 'active') {
-      cls = 'pill live';
-      if (s.aiBusy) text = 'Analyzing…';
-      else if (s.listening) text = `Listening as ${s.listening === 'caller' ? 'Caller' : 'Agent'}`;
-      else text = `Call active · ${fmtClock(elapsed())}`;
-    } else if (s.callStatus === 'ended') {
-      text = `Call ended · ${fmtClock(s.transcript.length ? s.transcript[s.transcript.length - 1].t : 0)}`;
-      cls = 'pill ended';
-    }
-    return html`<span class=${cls}>${text}</span>`;
+  function pickScenario(id) {
+    const sc = scenarioById(id);
+    const idle = Store.get().callStatus === 'idle';
+    Store.set(Object.assign({ scenarioPick: id }, sc && idle ? { userId: userById(sc.customer).id } : {}));
   }
 
-  function Rail({ s }) {
-    const [draft, setDraft] = useState('');
+  function CallControls({ s }) {
     const simulated = s.mode === 'simulated';
+    const live = s.mode === 'live';
     const active = s.callStatus === 'active';
-    const sc = scenarioById(s.scenarioId);
-    const user = userById(s.userId);
-    const speakClass = (who) => 'rail-btn' + (active && !s.autoplay && s.nextSpeaker === who ? ' next' : '');
-    const micOn = !simulated && s.listening === 'agent';
-    const waitingTool = s.agentRequest && toolById(s.agentRequest.tool);
-    const waitingOn = waitingTool ? waitingTool.label : '';
-    const send = () => { const t = draft.trim(); if (!t) return; if (!active) { notify('Start the call first.'); return; } agentSays(t); setDraft(''); };
-    const audioBtn = html`<button class=${'rail-small ' + (s.settings.audio ? '' : 'off')} title=${TTS.supported ? 'Read the lines aloud' : 'Speech synthesis is not available in this browser'} onClick=${() => updateSettings({ audio: !s.settings.audio })}>${s.settings.audio ? '🔊 Audio on' : '🔇 Audio off'}</button>`;
-    const callNote = sc && s.callStatus !== 'idle' ? html`<b>${user.phone}</b> · ${sc.title}` : '';
+    const micOn = live && s.listening === 'agent';
+    const locked = active || !!s.incoming;
     return html`
-      <aside class="rail">
-        <div class="rail-top">
-          <${StatusPill} s=${s} />
-          <button class="icon-btn" title="Settings" aria-label="Settings" onClick=${() => Store.set({ settingsOpen: true })}>⚙</button>
-        </div>
+      <div class="tb-controls">
+        <select class="tb-select" title="Which scenario the AI caller plays" value=${s.scenarioPick} disabled=${locked} onChange=${(e) => pickScenario(e.target.value)}>
+          <option value="random">Random scenario</option>
+          ${AI.scenarios.map((x, i) => html`<option key=${x.id} value=${x.id}>${i + 1}. ${x.title}</option>`)}
+        </select>
         <div class="seg">
-          <button class=${simulated ? 'on' : ''} onClick=${() => setMode('simulated')}>Simulated</button>
-          <button class=${!simulated ? 'on' : ''} onClick=${() => setMode('live')}>Live voice</button>
+          <button class=${simulated ? 'on' : ''} disabled=${locked} title="AIs play the caller and the agent" onClick=${() => setMode('simulated')}>Simulated</button>
+          <button class=${live ? 'on' : ''} disabled=${locked} title="You are the agent on the mic" onClick=${() => setMode('live')}>Live call</button>
         </div>
-        <button class=${'rail-btn ' + (s.callStatus === 'idle' ? 'primary' : '')} onClick=${() => startCall()}>${s.callStatus === 'idle' ? 'Start call' : 'New call'}</button>
-        ${simulated ? html`
-          <button class=${speakClass('caller')} disabled=${!active || s.autoplay} onClick=${() => speakAs('caller')}>Speak as Caller</button>
-          <button class=${speakClass('agent')} disabled=${!active || s.autoplay} onClick=${() => speakAs('agent')}>Speak as Support Agent</button>
-          <div class="rail-row">
-            <button class="rail-small" onClick=${toggleAutoplay}>${s.autoplay ? '❚❚ Pause' : '▶ Play all'}</button>
-            <button class="rail-small" disabled=${!active || s.autoplay} onClick=${() => playNext()}>Next ▸</button>
-          </div>
-          <div class="rail-row">
-            ${audioBtn}
-            <span class="rail-note center">${sc && s.callStatus !== 'idle' ? `Turn ${s.turnCount}` : ''}</span>
-          </div>
-          <div class="rail-note">${callNote || 'An AI plays the caller and another plays the agent. Pick a scenario below, or leave it random.'}</div>
-          ${s.settings.audio && !TTS.supported ? html`<div class="rail-warn">No speech synthesis here; lines play silently.</div>` : ''}
-          ${waitingOn ? html`<div class="rail-warn">Waiting for you to run ${waitingOn}.</div>` : ''}
-          ${!waitingOn && s.waitingStep ? html`<div class="rail-warn">The agent is checking: start the workflow step it needs. <button class="rail-link" onClick=${finishStepWait}>Continue without</button></div>` : ''}
-        ` : html`
-          <button class=${'rail-btn' + (micOn ? ' listening' : '')} disabled=${!active || !recognizer.supported} onClick=${toggleMic}>
-            ${micOn ? html`<i class="dot"></i>Mic on · click to mute` : 'Mic muted · click to talk'}
-          </button>
-          <div class="rail-row">
-            <button class="rail-small" disabled=${!active || !s.interim} onClick=${commitAgentTurn}>Done speaking</button>
-            ${audioBtn}
-          </div>
-          <div class="rail-note">
-            ${!active ? 'An AI plays the caller; you are the support agent on the mic. Pick a scenario below, or leave it random.'
-              : s.speaking === 'caller' ? 'The caller is speaking; your mic resumes when they finish.'
-              : s.callerThinking ? 'The caller is replying…'
-              : micOn ? html`<span class="rec">● Listening.</span> Speak to the caller; a short pause ends your turn.`
-              : recognizer.supported ? 'Your mic is muted.' : 'Voice input needs Chrome or Edge. Type your lines below.'}
-          </div>
-          ${callNote ? html`<div class="rail-note">${callNote}</div>` : ''}
-          ${s.settings.audio && !TTS.supported ? html`<div class="rail-warn">No speech synthesis here; the caller's lines play silently.</div>` : ''}
-          <textarea id="live-draft" class="rail-text" rows="2" placeholder="Or type what you say to the caller…" value=${draft} onInput=${(e) => setDraft(e.target.value)}
-            onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}></textarea>
-          <div class="rail-row">
-            <button class="rail-small" disabled=${!active} onClick=${send}>Send</button>
-          </div>
-        `}
-
-        <label class="rail-select" title="Which scenario the AI caller plays">
-          <span>Scenario</span>
-          <select value=${s.scenarioPick} disabled=${active} onChange=${(e) => Store.set({ scenarioPick: e.target.value })}>
-            <option value="random">Random</option>
-            ${AI.scenarios.map((x, i) => html`<option key=${x.id} value=${x.id}>${i + 1}. ${x.title}</option>`)}
-          </select>
-        </label>
-        <div class="rail-row">
-          <button class="rail-btn ghost" disabled=${!active} onClick=${endCall}>End call</button>
-          <button class="rail-btn ghost" disabled=${s.callStatus === 'idle' && !s.transcript.length} onClick=${resetAll}>Reset</button>
-        </div>
-        <div class=${'ai-status ' + (AI.available() ? 'ok' : '')} title=${s.aiStatus.label}>${s.aiStatus.label}</div>
-      </aside>`;
+        <button class="tb-btn" disabled=${locked} onClick=${ringCall}>Start call</button>
+        ${active && simulated ? html`<button class="tb-btn" onClick=${toggleAutoplay}>${s.autoplay ? '❚❚ Pause' : '▶ Resume'}</button>` : ''}
+        ${active && live ? html`<button class="tb-btn" disabled=${!recognizer.supported} onClick=${toggleMic}>${micOn ? '❚❚ Pause' : '▶ Resume'}</button>` : ''}
+        <button class="tb-btn ghost" disabled=${!active} onClick=${endCall}>End call</button>
+        <button class="tb-btn ghost" disabled=${s.callStatus === 'idle' && !s.transcript.length} onClick=${resetAll}>Reset</button>
+      </div>`;
   }
 
-  function StepIcon({ status }) {
-    if (status === 'done') return html`<svg class="ico ok" viewBox="0 0 14 14" aria-label="done"><polyline points="2,7 6,11 12,3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-    return html`<span class="ico pend" aria-label="pending"></span>`;
-  }
-
-  function StepButton({ g, st, active }) {
-    if (st.running) return html`<span class="wf-run busy" title="Working on this step…"><i class="spin"></i></span>`;
-    const again = st.status === 'done';
-    return html`<button class=${'wf-run' + (again ? ' again' : '')} disabled=${!active} title=${again ? 'Run this step again' : 'Start this step'} aria-label=${again ? 'Run this step again' : 'Start this step'}
-      onClick=${() => runStep(g.id, st.id)}>${again ? '↻' : '▶'}</button>`;
+  const EMPTY_ICONS = {
+    steps: html`<polyline points="3.5,6 5,7.5 7.5,5" /><polyline points="3.5,12 5,13.5 7.5,11" /><polyline points="3.5,18 5,19.5 7.5,17" /><path d="M11 6h9M11 12h9M11 18h9" />`,
+    guidance: html`<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2v.2h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z" />`,
+    tools: html`<path d="M14.7 6.3a4 4 0 0 0-5.4 5.1l-5.8 5.8a1.8 1.8 0 0 0 2.6 2.6l5.8-5.8a4 4 0 0 0 5.1-5.4l-2.5 2.5-2.3-.4-.4-2.3z" />`,
+    transcript: html`<path d="M4 5h16v11H9l-5 4z" /><path d="M8 9.5h8M8 12.5h5" />`,
+  };
+  function EmptyIcon({ name }) {
+    return html`<div class="empty" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${EMPTY_ICONS[name]}</svg></div>`;
   }
 
   function Workflow({ s }) {
     const groups = s.groups;
     return html`
       <div class="wf">
-        <h2 class="panel-title">Workflow Steps</h2>
+        <h2 class="panel-title"><span>Workflow Steps</span></h2>
         <div class="wf-panel">
-          ${groups.length ? '' : html`<div class="wf-empty">${s.callStatus === 'idle' ? 'Steps appear once a call starts and the caller says what they need.' : 'Listening for what the caller needs…'}</div>`}
+          ${groups.length ? '' : html`<${EmptyIcon} name="steps" />`}
           ${groups.map((g) => html`
             <div key=${g.id + ':' + (g.changed || 0)} class=${'wf-group' + (g.changed ? ' pop' : '')}>
               <div class="wf-group-title">${g.title}</div>
               ${g.steps.map((st) => html`
-                <div key=${st.id + ':' + (st.changed || 0)} class=${'wf-step ' + st.status + (st.changed ? ' pop' : '') + (st.running ? ' running' : '')}>
-                  <${StepButton} g=${g} st=${st} active=${s.callStatus === 'active'} />
-                  <${StepIcon} status=${st.status} />
+                <button key=${st.id + ':' + (st.changed || 0)} class=${'wf-step ' + st.status + (st.changed ? ' pop' : '') + (st.running ? ' running' : '')}
+                  disabled=${s.callStatus !== 'active' || st.running} onClick=${() => runStep(g.id, st.id)}>
                   <span class="wf-label">${st.label}</span>
-                </div>`)}
+                </button>`)}
             </div>`)}
         </div>
       </div>`;
@@ -849,8 +794,7 @@
 
   function Tabs({ s }) {
     const tab = (id, label, badge) => html`<button class=${'tab ' + (s.tab === id ? 'on' : '')} onClick=${() => Store.set({ tab: id, unseenGuidance: id === 'guidance' ? 0 : s.unseenGuidance })}>${label}${badge ? html`<span class="tab-badge">${badge}</span>` : ''}</button>`;
-    return html`<div class="tabs">${tab('guidance', 'Live Guidance', s.tab !== 'guidance' && s.unseenGuidance ? s.unseenGuidance : 0)}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}
-      ${s.tab === 'guidance' && s.guidance.length ? html`<button class="link tabs-action" onClick=${() => Store.set({ guidance: [] })}>Clear guidance</button>` : ''}</div>`;
+    return html`<div class="tabs">${tab('guidance', 'Live Guidance', s.tab !== 'guidance' && s.unseenGuidance ? s.unseenGuidance : 0)}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}</div>`;
   }
 
   function GuidanceCard({ c }) {
@@ -887,13 +831,10 @@
       if (spacer) spacer.style.height = `${Math.max(0, room)}px`;
       const top = cleared ? last.offsetTop + last.offsetHeight : last.offsetTop - lead;
       try { box.scrollTo({ top, behavior: batches.length > 1 || cleared ? 'smooth' : 'auto' }); } catch (e) { box.scrollTop = top; }
-    }, [latest, cleared, s.guidance.length, s.aiBusy, s.aiError]);
+    }, [latest, cleared, s.guidance.length]);
     return html`
       <div class="guidance">
-        <div class="tags">
-          <span class="tags-label">Tags:</span>
-          ${s.tags.length ? s.tags.map((t) => html`<span key=${t} class="tag">${t}</span>`) : html`<span class="tags-empty">none yet</span>`}
-        </div>
+        <div class="gcol">
         <div class="gpanel">
         <div class="gbox" ref=${boxRef}>
           ${batches.length
@@ -901,10 +842,13 @@
               <div key=${b.batch} class=${'gbatch ' + (b.batch === latest && !cleared ? 'latest' : 'earlier')} ref=${i === batches.length - 1 ? lastRef : null}>
                 ${b.cards.map((c) => html`<${GuidanceCard} key=${c.id} c=${c} />`)}
               </div>`)
-            : html`<div class="gempty">${s.callStatus === 'idle' ? 'Start a call. Only things worth your attention show up here: policy risks, facts the caller needs, offers worth making.' : 'Nothing needs your attention yet.'}</div>`}
-          ${s.aiBusy ? html`<div class="gbusy">GPT-5.6 Luna is updating the screen…</div>` : ''}
-          ${s.aiError ? html`<div class="gerror">${s.aiError}</div>` : ''}
+            : html`<${EmptyIcon} name="guidance" />`}
           <div class="gspacer" ref=${spacerRef}></div>
+        </div>
+        <div class="tags">
+          <span class="tags-label">Tags:</span>
+          ${s.tags.length ? s.tags.map((t) => html`<span key=${t} class="tag">${t}</span>`) : ''}
+        </div>
         </div>
         </div>
         <${ActionFeed} s=${s} />
@@ -1001,11 +945,12 @@
   function ActionFeed({ s }) {
     const boxRef = useRef(null);
     const lastRun = s.feed.reduce((best, r) => (r.status === 'done' && (!best || (r.ranAt || 0) > (best.ranAt || 0)) ? r : best), null);
-    /* The last run stays expanded only until a new tool row opens after it. */
-    const latestRun = lastRun && !s.feed.some((r) => r.status === 'draft' && (r.openedAt || 0) > (lastRun.ranAt || 0)) ? lastRun : null;
+    /* The last run stays expanded only until a new tool row opens after it, and stays collapsed
+       while that row runs or after it is skipped. */
+    const latestRun = lastRun && (lastRun.ranAt || 0) > (s.lastOpenedAt || 0) ? lastRun : null;
     useAutoScroll(boxRef, `${s.feed.length}:${latestRun ? latestRun.id : ''}`);
     if (!s.feed.length) {
-      return html`<div class="toolio-hint">Tools appear here when you start a workflow step with ▶. Fill in or check the inputs as the call goes on (what the call or the customer record already says is filled in for you), then run the tool or skip it. Nothing runs until you do.</div>`;
+      return html`<div class="feed"><${EmptyIcon} name="tools" /></div>`;
     }
     return html`
       <div class="feed" ref=${boxRef}>
@@ -1013,55 +958,144 @@
       </div>`;
   }
 
+  const C360_ICONS = {
+    store: html`<path d="M4 9.5 5.5 4h13L20 9.5M4 9.5h16M4 9.5c0 1.4 1.1 2.5 2.7 2.5S9.3 10.9 9.3 9.5c0 1.4 1.2 2.5 2.7 2.5s2.7-1.1 2.7-2.5c0 1.4 1.1 2.5 2.6 2.5S20 10.9 20 9.5M5.5 12v8h13v-8M10 20v-4.5h4V20" />`,
+    shield: html`<path d="M12 3 5 6v5.5c0 4.2 3 7.8 7 9.5 4-1.7 7-5.3 7-9.5V6z" /><polyline points="9,12 11.2,14.2 15,10" />`,
+    people: html`<circle cx="9" cy="8.5" r="3" /><path d="M3.5 19c.6-3 2.8-4.8 5.5-4.8s4.9 1.8 5.5 4.8" /><circle cx="16.5" cy="9.5" r="2.3" /><path d="M16.2 14.3c2.3.1 3.9 1.6 4.3 4.2" />`,
+    rx: html`<rect x="4" y="9" width="16" height="6" rx="3" transform="rotate(-45 12 12)" /><path d="m9.5 9.5 5 5" />`,
+    pharmacy: html`<path d="M12 4v16M4 12h16" /><rect x="3.5" y="3.5" width="17" height="17" rx="4" />`,
+    allergy: html`<path d="M12 4 3 19.5h18z" /><path d="M12 10v4.5M12 17v.3" />`,
+    history: html`<circle cx="12" cy="12" r="8.5" /><polyline points="12,7.5 12,12 15,14" />`,
+    note: html`<path d="M5 4h14v11l-5 5H5z" /><path d="M14 20v-5h5" />`,
+  };
+  const C360Icon = ({ name }) => html`<svg class="c360-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${C360_ICONS[name]}</svg>`;
+  const C360Card = ({ icon, title, cls, children }) => html`
+    <section class=${'c360-card ' + (cls || '')}>
+      <h3><${C360Icon} name=${icon} />${title}</h3>
+      ${children}
+    </section>`;
+
+  const DEMO_TODAY = new Date(2026, 9, 22);
+  function ageFrom(dob) {
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(dob || ''));
+    if (!m) return null;
+    const born = new Date(+m[3], +m[1] - 1, +m[2]);
+    let age = DEMO_TODAY.getFullYear() - born.getFullYear();
+    if (DEMO_TODAY < new Date(DEMO_TODAY.getFullYear(), born.getMonth(), born.getDate())) age -= 1;
+    return age;
+  }
+  function rxTone(status) {
+    const x = String(status || '').toLowerCase();
+    if (/reject|denied|hold|expired|cancel/.test(x)) return ['bad', 'Needs attention'];
+    if (/request|progress|ready|transfer|pending/.test(x)) return ['warn', 'In progress'];
+    if (/^active/.test(x)) return ['ok', 'Active'];
+    return ['neutral', status];
+  }
+  const noneLike = (v) => !v || /^(none|not enrolled|none on file)$/i.test(String(v).trim());
+
   function CustomerTab({ s }) {
     const u = userById(s.userId);
     const kv = (rows) => html`<dl class="kv">${rows.map(([k, v]) => html`<div key=${k}><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>`;
+    const initials = u.name.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+    const age = ageFrom(u.dob);
+    const allergies = (u.allergies || []).filter((a) => !noneLike(a));
+    const reps = u.representatives || [];
+    const insOk = /^active$/i.test(u.insurance.status);
+    const alertsOn = !noneLike(u.textAlerts);
+    const pill = (tone, text) => html`<span class=${'c360-pill ' + tone}>${text}</span>`;
     return html`
       <div class="c360">
-        ${s.callStatus !== 'idle' ? html`<div class="incoming wide">☏ Incoming call from <b>${u.phone}</b> · matched to <b>${u.name}</b>${s.callStatus === 'ended' ? ' · call ended' : ''}</div>` : ''}
-        <section>
-          <h3>Profile</h3>
-          ${kv([['Name', u.name], ['Date of birth', u.dob], ['Phone', u.phone], ['Email', u.email], ['Preferred contact', u.preferredContact], ['Language', u.language]])}
+        <section class="c360-hero">
+          <div class="c360-avatar">${initials}</div>
+          <div class="c360-id">
+            <div class="c360-name">${u.name}
+              ${s.callStatus === 'active' ? html`<span class="c360-pill ok live"><i></i>On call · matched by phone</span>` : ''}
+              ${s.callStatus === 'ended' ? pill('neutral', 'Call ended') : ''}
+            </div>
+            <div class="c360-sub">DOB ${u.dob}${age != null ? ` · ${age} yrs` : ''} · ${u.language}</div>
+            <div class="c360-chips">
+              <span class="c360-chip">☏ ${u.phone}</span>
+              <span class="c360-chip">✉ ${u.email}</span>
+              <span class="c360-chip">Prefers ${String(u.preferredContact).toLowerCase()}</span>
+            </div>
+          </div>
+          <div class="c360-badges">
+            ${pill(insOk ? 'ok' : 'bad', `Insurance ${String(u.insurance.status).toLowerCase()}`)}
+            ${allergies.length ? pill('bad', `Allergy: ${allergies.join(', ')}`) : pill('neutral', 'No known allergies')}
+            ${reps.length ? pill('info', `${reps.length} authorized rep${reps.length > 1 ? 's' : ''}`) : pill('neutral', 'No reps on file')}
+            ${pill(alertsOn ? 'ok' : 'neutral', alertsOn ? 'Text alerts on' : 'Text alerts off')}
+            ${pill('neutral', `${u.prescriptions.length} active Rx`)}
+          </div>
         </section>
-        <section>
-          <h3>Preferred store</h3>
-          ${kv([['Store', `${u.store.name} ${u.store.id}`], ['Address', u.store.address], ['Phone', u.store.phone], ['Hours', u.store.hours]])}
-        </section>
-        <section>
-          <h3>Insurance</h3>
-          ${kv([['Plan', u.insurance.plan], ['Member ID', u.insurance.memberId], ['Group', u.insurance.group], ['Status', u.insurance.status]])}
-        </section>
-        <section>
-          <h3>Representatives and alerts</h3>
-          ${kv([['Authorized representatives', (u.representatives || []).length ? u.representatives.map((r) => `${r.name} (${r.relationship}, since ${r.since})`).join('; ') : 'None on file'], ['Text alerts', u.textAlerts || 'Not enrolled']])}
-        </section>
-        <section class="wide">
-          <h3>Active prescriptions</h3>
+
+        <div class="c360-row">
+          <${C360Card} icon="store" title="Preferred store">
+            ${kv([['Store', `${u.store.name} ${u.store.id}`], ['Address', u.store.address], ['Phone', u.store.phone], ['Hours', u.store.hours]])}
+          <//>
+          <${C360Card} icon="shield" title="Insurance">
+            ${kv([['Plan', u.insurance.plan], ['Member ID', u.insurance.memberId], ['Group', u.insurance.group], ['Status', pill(insOk ? 'ok' : 'bad', u.insurance.status)]])}
+          <//>
+          <${C360Card} icon="people" title="Representatives & alerts">
+            <dl class="kv">
+              <div><dt>Authorized reps</dt><dd>${reps.length
+                ? reps.map((r) => html`<div key=${r.name} class="c360-rep"><b>${r.name}</b><span>${r.relationship} · since ${r.since}</span></div>`)
+                : html`<span class="c360-muted">None on file</span>`}</dd></div>
+              <div><dt>Text alerts</dt><dd>${alertsOn ? u.textAlerts : html`<span class="c360-muted">${u.textAlerts || 'Not enrolled'}</span>`}</dd></div>
+            </dl>
+          <//>
+        </div>
+
+        <${C360Card} icon="rx" title="Active prescriptions" cls="wide">
           <table class="rx">
-            <thead><tr><th>Rx</th><th>Medication</th><th>Directions</th><th>Supply</th><th>Refills</th><th>Last fill</th><th>Copay 30 / 90 days</th><th>Status</th></tr></thead>
-            <tbody>${u.prescriptions.map((p) => html`<tr key=${p.rx}><td>${p.rx}</td><td>${p.drug}</td><td>${p.sig}</td><td>${p.qty} / ${p.days} days</td><td>${p.refills}</td><td>${p.lastFill}</td><td>${p.copay30} / ${p.copay90}</td><td>${p.status}</td></tr>`)}</tbody>
+            <thead><tr><th>Medication</th><th>Directions</th><th>Supply</th><th>Refills</th><th>Last fill</th><th>Copay</th><th>Status</th></tr></thead>
+            <tbody>${u.prescriptions.map((p) => {
+              const [tone, label] = rxTone(p.status);
+              return html`<tr key=${p.rx}>
+                <td><div class="rx-drug">${p.drug}</div><div class="rx-meta">Rx ${p.rx}${p.prescriber ? ` · ${p.prescriber}` : ''}</div></td>
+                <td>${p.sig}</td>
+                <td class="nowrap">${p.qty} / ${p.days} days</td>
+                <td>${p.refills}</td>
+                <td class="nowrap">${p.lastFill}</td>
+                <td class="nowrap rx-copay"><div><span>30 days</span>${p.copay30}</div><div><span>90 days</span>${p.copay90}</div></td>
+                <td class="rx-status">${pill(tone, label)}${label !== p.status ? html`<div class="rx-meta">${p.status}</div>` : ''}</td>
+              </tr>`;
+            })}</tbody>
           </table>
-        </section>
+        <//>
+
         ${(u.otherPharmacies || []).length ? html`
-          <section class="wide">
-            <h3>At other pharmacies</h3>
+          <${C360Card} icon="pharmacy" title="At other pharmacies" cls="wide">
             <table class="rx">
-              <thead><tr><th>Medication</th><th>Directions</th><th>Pharmacy</th><th>Copay 30 / 90 days</th><th>Note</th></tr></thead>
-              <tbody>${u.otherPharmacies.map((p) => html`<tr key=${p.drug}><td>${p.drug}</td><td>${p.sig}</td><td>${p.pharmacy}</td><td>${p.copay30} / ${p.copay90}</td><td>${p.note}</td></tr>`)}</tbody>
+              <thead><tr><th>Medication</th><th>Directions</th><th>Pharmacy</th><th>Copay</th><th>Note</th></tr></thead>
+              <tbody>${u.otherPharmacies.map((p) => html`<tr key=${p.drug}>
+                <td><div class="rx-drug">${p.drug}</div></td>
+                <td>${p.sig}</td>
+                <td>${p.pharmacy}</td>
+                <td class="nowrap rx-copay"><div><span>30 days</span>${p.copay30}</div><div><span>90 days</span>${p.copay90}</div></td>
+                <td class="rx-meta">${p.note}</td>
+              </tr>`)}</tbody>
             </table>
-          </section>` : ''}
-        <section>
-          <h3>Allergies and immunizations</h3>
-          ${kv([['Allergies', u.allergies.join(', ')], ['Immunizations', u.immunizations.length ? u.immunizations.map((i) => `${i.vaccine} (${i.date})`).join('; ') : 'None on file']])}
-        </section>
-        <section>
-          <h3>Recent interactions</h3>
-          <ul class="hist">${u.interactions.map((i) => html`<li key=${i.date + i.channel}><b>${i.date}</b> · ${i.channel}: ${i.summary}</li>`)}</ul>
-        </section>
-        <section class="wide">
-          <h3>Notes</h3>
-          <p>${u.notes}</p>
-        </section>
+          <//>` : ''}
+
+        <div class="c360-row two">
+          <${C360Card} icon="allergy" title="Allergies & immunizations">
+            <div class="c360-label">Allergies</div>
+            <div class="c360-chips">${allergies.length ? allergies.map((a) => html`<span key=${a} class="c360-pill bad">${a}</span>`) : html`<span class="c360-muted">No known allergies</span>`}</div>
+            <div class="c360-label">Immunizations</div>
+            ${u.immunizations.length
+              ? html`<ul class="c360-imm">${u.immunizations.map((i) => html`<li key=${i.vaccine + i.date}><span>${i.vaccine}</span><span class="c360-muted">${i.date}</span></li>`)}</ul>`
+              : html`<span class="c360-muted">None on file</span>`}
+          <//>
+          <${C360Card} icon="history" title="Recent interactions">
+            <ul class="c360-timeline">${u.interactions.map((i) => html`
+              <li key=${i.date + i.channel}>
+                <div class="tl-head"><b>${i.date}</b><span class="c360-chip small">${i.channel}</span></div>
+                <div class="tl-text">${i.summary}</div>
+              </li>`)}</ul>
+          <//>
+        </div>
+
+        ${u.notes ? html`<section class="c360-note"><h3><${C360Icon} name="note" />Notes</h3><p>${u.notes}</p></section>` : ''}
       </div>`;
   }
 
@@ -1070,7 +1104,7 @@
     useAutoScroll(boxRef, `${s.transcript.length}|${s.interim}`);
     return html`
       <div class="transcript" ref=${boxRef}>
-        ${s.transcript.length ? '' : html`<div class="gempty">${s.callStatus === 'idle' ? 'The live transcript appears here once the call starts.' : 'Waiting for the first line…'}</div>`}
+        ${s.transcript.length || s.interim ? '' : html`<${EmptyIcon} name="transcript" />`}
         ${s.transcript.map((l) => html`
           <div key=${l.id} class=${'tline ' + l.speaker}>
             <span class="tt">${fmtClock(l.t)}</span>
@@ -1091,6 +1125,28 @@
           <input id="ask-input" type="text" placeholder="Ask the assistant… e.g. can she stack a coupon with insurance?" value=${q} onInput=${(e) => setQ(e.target.value)} />
           <button type="submit" class="btn-ask" disabled=${busy || !q.trim()}>${busy ? '…' : 'Ask'}</button>
         </form>
+      </div>`;
+  }
+
+  function IncomingCallModal({ s }) {
+    const u = userById(s.incoming.userId);
+    useEffect(() => {
+      const onKey = (e) => { if (e.key === 'Escape') declineCall(); };
+      window.addEventListener('keydown', onKey);
+      return () => window.removeEventListener('keydown', onKey);
+    }, []);
+    return html`
+      <div class="modal-back ring-back">
+        <div class="ring" role="dialog" aria-modal="true" aria-label="Incoming call">
+          <div class="ring-icon" aria-hidden="true">☏</div>
+          <div class="ring-title">Incoming call</div>
+          <div class="ring-number">${u.phoneMasked || u.phone}</div>
+          <div class="ring-sub">Walgreens pharmacy line · ${s.mode === 'simulated' ? 'Simulated call' : 'Live call'}</div>
+          <div class="ring-actions">
+            <button class="ring-btn decline" onClick=${declineCall}>Decline</button>
+            <button class="ring-btn accept" onClick=${acceptCall}>Accept</button>
+          </div>
+        </div>
       </div>`;
   }
 
@@ -1121,7 +1177,6 @@
           ` : html`
             <p class="modal-help">${AI.server ? 'This server has no OpenAI key yet. Add OPENAI_API_KEY and ELEVENLABS_API_KEY to .env and restart. Simulated calls need it.' : 'No local server is running, so no AI is available for simulated calls. From the project folder, run npm start and open http://localhost:8080.'}</p>
           `}
-          <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the simulated call aloud</span></label>
           <p class="modal-help">The panels update automatically after every line. Behavior comes from prompts/system_prompt.md, prompts/phone_assist_workflow.md, prompts/phone_assist_guidance.md, prompts/phone_assist_best_reply.md, prompts/chat.md, tools.md and kb/. Refresh the page after editing them.</p>
           <div class="modal-actions">
             <button class="btn-dark" onClick=${save}>Save</button>
@@ -1137,11 +1192,43 @@
     return s.notice ? html`<div class="toast">${s.notice}</div>` : '';
   }
 
+  function Header({ s }) {
+    const nav = [['⌂', 'Overview'], ['⟲', 'AI Studio'], ['▤', 'Knowledge Base'], ['☺', 'Playground'], ['◯', 'Conversations']];
+    return html`
+      <header class="hdr">
+        <div class="topnav">
+          <span class="brand">Cignara</span>
+          <span class="brand-sep">/</span>
+          <nav class="nav">
+            ${nav.map(([ico, label]) => html`<span key=${label} class=${'nav-item' + (label === 'Playground' ? ' on' : '')}><i>${ico}</i>${label}</span>`)}
+          </nav>
+          <div class="org">
+            <span class="org-name">Walgreens Pharmacy Self…</span>
+            <span class="org-env">No environment ▾</span>
+          </div>
+          <span class="avatar" aria-hidden="true"></span>
+        </div>
+        <div class="toolbar">
+          <span class="tb-title">☏ Phone Assist ▾</span>
+          <span class="tb-sep"></span>
+          <span class="tb-muted">Draft ▾</span>
+          <span class="tb-sep"></span>
+          <${CallControls} s=${s} />
+          <span class="tb-right">
+            <span class="tb-muted">● Select user ▾</span>
+            <span class="tb-muted">☏ Assign number ▾</span>
+            <span class="tb-muted">⋯</span>
+          </span>
+        </div>
+      </header>`;
+  }
+
   function App() {
     const s = useStore();
     return html`
+      <${Header} s=${s} />
       <div class="stage">
-        <${Rail} s=${s} />
+        <div class="canvas">
         <main class="card">
           <section class="left">
             <${Workflow} s=${s} />
@@ -1156,7 +1243,9 @@
             <${BottomBar} s=${s} />
           </section>
         </main>
+        </div>
       </div>
+      ${s.incoming ? html`<${IncomingCallModal} s=${s} />` : ''}
       ${s.settingsOpen ? html`<${SettingsModal} s=${s} />` : ''}
       <${Toast} s=${s} />`;
   }
@@ -1172,5 +1261,5 @@
   AI.init(Store.get().settings);
   render(html`<${App} />`, document.getElementById('app'));
 
-  global.PhoneAssist = { Store, startCall, playNext, toggleAutoplay, openDraft, runManualRow, runStep, settle, getBestReply, askQuestion, setMode, speakAs, toggleMic, agentSays, resetAll, endCall };
+  global.PhoneAssist = { Store, startCall, ringCall, acceptCall, declineCall, playNext, toggleAutoplay, openDraft, runManualRow, runStep, settle, getBestReply, askQuestion, setMode, toggleMic, agentSays, resetAll, endCall };
 })(window);

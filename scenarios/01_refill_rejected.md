@@ -1,6 +1,8 @@
 <!-- One scenario per file. "customer:" links it to a record in data.js (USERS).
      "## Caller" is given only to the caller AI; "## Support agent" only to the support agent AI.
-     "## Happy path" documents the intended flow for people; neither AI is given it. -->
+     "## Happy path" is the intended flow. Only the tool simulator is given it (as the intended outcome),
+     so tool results follow it; the caller, agent and guidance AIs never see it.
+     Each scenario has its own record, so a record only carries what fits that call. -->
 
 # Refill rejected by insurance, cheaper 90-day supply, flu shot add-on
 

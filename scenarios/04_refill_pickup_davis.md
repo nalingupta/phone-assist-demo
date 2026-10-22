@@ -1,6 +1,6 @@
 # Refill before a trip, picked up at another store, text alerts sign-up
 
-customer: maria
+customer: maria_trip
 
 ## Caller
 

@@ -204,6 +204,26 @@
     ].join('\n');
   }
 
+  /* What a caller knows about the patient from their own life: no member IDs, claim codes or copays. */
+  function callerRecordText(user) {
+    if (!user) return '(none)';
+    const meds = user.prescriptions.concat(user.otherPharmacies || []).map((p) => `  - ${p.drug}, ${p.sig}${p.pharmacy ? ` (filled at ${p.pharmacy})` : ''}`).join('\n');
+    const reps = (user.representatives || []).map((r) => `${r.name} (${r.relationship})`).join('; ');
+    return [
+      `Patient: ${user.name}; date of birth ${user.dob}; phone ${user.phone}; email ${user.email}.`,
+      `Usual Walgreens: ${user.store.name}, ${user.store.address}.`,
+      `Insurance: ${user.insurance.plan}.`,
+      `Medications:\n${meds}`,
+      `Allergies: ${user.allergies.join(', ')}.`,
+      `Family members allowed to handle the patient's prescriptions: ${reps || 'none'}.`
+    ].join('\n');
+  }
+
+  function scenarioHappyPath(state) {
+    const sc = (AI.scenarios || []).find((x) => x.id === state.scenarioId);
+    return (sc && sc.happyPath) || '(none given: every lookup finds what it needs and every action succeeds)';
+  }
+
   function fmtTime(t) {
     const s = Math.max(0, Math.round(t || 0));
     return `[${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}]`;
@@ -275,7 +295,8 @@
       title: ((body.match(/^#\s+(.+)$/m) || [])[1] || file).trim(),
       customer,
       caller: section('Caller'),
-      agent: section('Support agent')
+      agent: section('Support agent'),
+      happyPath: section('Happy path')
     };
   }
 
@@ -450,9 +471,9 @@
       return this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: GUIDANCE_SCHEMA, maxTokens: 6000 });
     },
 
-    /* Simulated call: the caller's next line. Sees only its scenario, what was said and its phone's texts. */
-    callerTurn(state, scenario) {
-      const system = [DEMO_TODAY, stripComments(this.files.prompts.caller || ''), `# Your scenario\n${scenario.caller}`].join('\n\n---\n\n');
+  /* Simulated call: the caller's next line. Sees only its scenario, what was said and its phone's texts. */
+    callerTurn(state, scenario, user) {
+      const system = [DEMO_TODAY, stripComments(this.files.prompts.caller || ''), `# Your scenario\n${scenario.caller}`, `# Facts about the patient you know from your own life\n${callerRecordText(user)}`].join('\n\n---\n\n');
       const prompt = [
         `The call so far:\n${callerTranscript(state)}`,
         `Texts on your phone:\n${phoneTexts(state)}`,
@@ -506,6 +527,7 @@
         `Example output (the format to follow):\n${JSON.stringify(tool.example, null, 2)}`,
         `Call transcript so far:\n${transcriptText(state)}`,
         `Earlier tool calls in this call:\n${toolRunsText(state)}`,
+        `Intended outcome of this call (the demo's happy path; results, dates and times follow it):\n${scenarioHappyPath(state)}`,
         'Return the JSON object this tool returns.'
       ].join('\n\n');
       try {

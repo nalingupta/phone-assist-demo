@@ -6,7 +6,10 @@
   /* ------------------------------------------------------------------ */
   /* Mock customers (Customer 360 records)                               */
   /* Copays are per prescription, from the patient's plan.                */
+  /* One record per scenario: a person who appears in two scenarios has   */
+  /* a variant whose prescriptions and history fit only that call.        */
   /* ------------------------------------------------------------------ */
+  const variant = (base, changes) => Object.assign({}, base, changes);
   const USERS = [
     {
       id: 'maria',
@@ -93,6 +96,31 @@
       notes: 'New to Walgreens. Works near the Davis St store.'
     }
   ];
+
+  const byId = (id) => USERS.find((u) => u.id === id);
+
+  /* Scenario 04: Maria's metformin refill before a trip. Atorvastatin was filled 10/12 and is not due. */
+  USERS.push(variant(byId('maria'), {
+    id: 'maria_trip',
+    prescriptions: [
+      { rx: '7731-2208', drug: 'Atorvastatin 20 mg tablet', sig: '1 tablet daily', qty: 30, days: 30, refills: 1, lastFill: '10/12/2026', prescriber: 'Dr. Anita Rao', copay30: '$30.00', copay90: '$45.00', status: 'Active' },
+      { rx: '7731-1194', drug: 'Metformin 500 mg tablet', sig: '1 tablet twice daily', qty: 60, days: 30, refills: 5, lastFill: '09/26/2026', prescriber: 'Dr. Anita Rao', copay30: '$5.00', copay90: '$10.00', status: 'Active' }
+    ],
+    notes: 'Prefers text confirmations. Not enrolled in prescription text alerts yet. Travels for work; working from the Davis St office this week.'
+  }));
+
+  /* Scenario 05: Lauren calls for James. His Eliquis was already moved from CVS in September. */
+  USERS.push(variant(byId('james'), {
+    id: 'james_rep',
+    prescriptions: [
+      { rx: '5520-9031', drug: 'Lisinopril 20 mg tablet', sig: '1 tablet daily', qty: 90, days: 90, refills: 1, lastFill: '08/14/2026', prescriber: 'Dr. Howard Lin', copay30: '$10.00', copay90: '$20.00', status: 'Active' },
+      { rx: '5520-9188', drug: 'Eliquis (apixaban) 5 mg tablet', sig: '1 tablet twice daily', qty: 180, days: 90, refills: 3, lastFill: '09/30/2026', prescriber: 'Dr. Howard Lin', copay30: '$47.00', copay90: '$94.00', status: 'Active' }
+    ],
+    otherPharmacies: [],
+    interactions: [
+      { date: '09/30/2026', channel: 'In store', summary: 'Eliquis transferred from CVS; Lauren picked up a 90-day supply for him.' }
+    ]
+  }));
 
   /* Scenarios for simulated calls live in scenarios/*.md and link to these records by id. */
   global.DEMO = { USERS };
