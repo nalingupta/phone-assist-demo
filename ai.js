@@ -39,12 +39,13 @@
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', description: 'The guidance type name defined in your instructions.' },
+            kind: { type: 'string', description: 'The flashcard tag defined in your instructions.' },
             text: { type: 'string' },
             bullets: { type: 'array', items: { type: 'string' } },
-            source: { type: 'string' }
+            source: { type: 'string' },
+            subject: { type: 'string', description: 'Three to six words naming what the card is about.' }
           },
-          required: ['kind', 'text', 'bullets', 'source'], additionalProperties: false
+          required: ['kind', 'text', 'bullets', 'source', 'subject'], additionalProperties: false
         }
       },
       tools: {
@@ -58,9 +59,10 @@
           },
           required: ['name', 'inputs'], additionalProperties: false
         }
-      }
+      },
+      newest_card_still_applies: { type: 'boolean', description: 'False once the call has moved past the point of the newest card on screen.' }
     },
-    required: ['tags', 'guidance', 'tools'],
+    required: ['tags', 'guidance', 'tools', 'newest_card_still_applies'],
     additionalProperties: false
   };
   const CALLER_SCHEMA = {
@@ -203,9 +205,13 @@
     return `[${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}]`;
   }
 
+  /* Lines still being spoken (`speaking`) are not heard yet, so no prompt sees them. */
+  const heard = (state) => state.transcript.filter((l) => !l.speaking);
+
   function transcriptText(state) {
-    if (!state.transcript.length) return '(no lines yet)';
-    return state.transcript.map((l) => {
+    const lines = heard(state);
+    if (!lines.length) return '(no lines yet)';
+    return lines.map((l) => {
       const who = l.speaker === 'caller' ? 'CALLER' : l.speaker === 'agent' ? 'AGENT' : 'TOOL';
       return `${fmtTime(l.t)} ${who}: ${l.text}`;
     }).join('\n');
@@ -285,7 +291,7 @@
 
   /* What the caller hears: spoken lines only, from the caller's point of view. */
   function callerTranscript(state) {
-    const lines = state.transcript.filter((l) => l.speaker === 'caller' || l.speaker === 'agent');
+    const lines = heard(state).filter((l) => l.speaker === 'caller' || l.speaker === 'agent');
     return lines.length ? lines.map((l) => `${l.speaker === 'caller' ? 'YOU' : 'AGENT'}: ${l.text}`).join('\n') : '(the call has just connected)';
   }
 
@@ -418,21 +424,24 @@
       return this.json({ system: buildSystem('phone_assist_workflow', user), user: prompt, schema: WORKFLOW_SCHEMA, maxTokens: 4000 });
     },
 
-    /* After every line (with workflow()): tags, tool prefill and any Caution. With `step`, the one card
-       for a workflow step: when the agent starts it, or after its tool ran (`step.ranTool`). */
-    guidance(state, user, step) {
-      const recent = (state.guidance || []).slice(-10);
-      const shown = recent.map((c, i) => `${fmtTime(c.t)} ${c.kind}: ${c.text}${i === recent.length - 1 ? '   <- newest card, still on screen' : ''}`).join('\n') || '(none yet)';
+    /* After every line and every tool the agent runs (with workflow()): at most one flashcard for the
+       latest event, the tags, and the prefill for open tool rows. */
+    guidance(state, user) {
+      const cards = state.guidance || [];
+      const onScreen = cards.length && !cards[cards.length - 1].retired ? cards[cards.length - 1] : null;
+      const shown = cards.slice(-12).map((c) => `${fmtTime(c.t)} [${c.subject || 'no subject'}] ${c.kind}: ${c.text}${c === onScreen ? '   <- newest card, still on screen' : ''}`).join('\n') || '(none yet)';
+      const lastLine = heard(state).reverse().find((l) => l.speaker === 'caller' || l.speaker === 'agent');
+      const lastRun = (state.toolRuns || [])[state.toolRuns.length - 1];
+      const latest = lastRun && (!lastLine || lastRun.t >= lastLine.t)
+        ? `The agent just ran ${lastRun.tool}; its result is the last tool call above.`
+        : lastLine ? `${fmtTime(lastLine.t)} ${lastLine.speaker === 'caller' ? 'CALLER' : 'AGENT'}: ${lastLine.text}` : '(the call has just started)';
       const prompt = [
         `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}`,
         `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
         `Screen before this update:\n${screenText(state)}`,
-        `Guidance already shown (oldest first, [mm:ss] since the call started, same clock as the transcript):\n${shown}`,
-        !step
-          ? 'Update the tags and tools for this moment, including every tool row open on screen. Return a card only for a Caution; otherwise no card. Return the JSON object.'
-          : step.ranTool
-            ? `The agent just ran ${step.ranTool} for the step "${step.step}" of the "${step.workflow}" workflow; its result is the last tool call above. Give the one card for this step built on that result. Return the JSON object.`
-            : `The agent just started the step "${step.step}" of the "${step.workflow}" workflow. Give the one card for this step now. Return the JSON object.`
+        `Flashcards already shown this call (oldest first, [subject] tag: text):\n${shown}${onScreen ? '' : '\n(no card is on screen now)'}`,
+        `The latest event, the only thing a new card may respond to:\n${latest}`,
+        'Decide whether this event meets a trigger. Return at most one card, usually none; decide whether the newest card on screen still applies; update the tags and the tool prefill. Return the JSON object.'
       ].join('\n\n');
       return this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: GUIDANCE_SCHEMA, maxTokens: 6000 });
     },
@@ -450,7 +459,7 @@
 
     /* Simulated call: the support agent's next line, driven by the guidance on screen. */
     agentTurn(state, user, scenario) {
-      const lastAgent = [...state.transcript].reverse().find((l) => l.speaker === 'agent');
+      const lastAgent = heard(state).reverse().find((l) => l.speaker === 'agent');
       const card = (state.guidance || [])[state.guidance.length - 1];
       const cardText = card
         ? `${fmtTime(card.t)} ${card.kind}: ${card.text}${(card.bullets || []).length ? `\n${card.bullets.map((b) => `  - ${b}`).join('\n')}` : ''}${card.source ? `\n(source: ${card.source})` : ''}\n${!lastAgent || card.t >= lastAgent.t ? 'This card appeared since your last line: act on it.' : 'This card was already on screen before your last line.'}`
@@ -484,20 +493,29 @@
       return this.json({ system: buildSystem('chat', user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
     },
 
-    /* Returns { output, simulated, fallback?, error? }. The example output is the fallback. */
-    async simulateTool(tool, inputs, state, user) {
+    /* Returns { output, summary?, simulated, fallback?, error? }. The example output is the fallback.
+       `summary` is the bullet list for `step`: this result compiled with the step's earlier ones. */
+    async simulateTool(tool, inputs, state, user, step) {
       if (!tool.dynamic) return { output: tool.example, simulated: false };
       if (!this.available()) return { output: tool.example, simulated: false, fallback: true, error: 'No AI model is connected.' };
+      const schema = {
+        type: 'object',
+        properties: { output: schemaFor(tool.example), summary: { type: 'array', items: { type: 'string' } } },
+        required: ['output', 'summary'], additionalProperties: false
+      };
+      const sameStep = step ? (state.toolRuns || []).filter((r) => r.step && r.step.stepId === step.stepId) : [];
       const prompt = [
         `Simulate this tool call now.\nTool: ${tool.id}\nDescription: ${tool.description}\nInputs given: ${JSON.stringify(inputs || {})}`,
         `Example output (the format to follow):\n${JSON.stringify(tool.example, null, 2)}`,
         `Call transcript so far:\n${transcriptText(state)}`,
         `Earlier tool calls in this call:\n${toolRunsText(state)}`,
-        'Return the JSON object this tool returns.'
+        `Workflow step this tool runs for: ${step ? `"${step.label}"` : '(none)'}\nEarlier tool calls in this step:\n${sameStep.length ? toolRunsText({ toolRuns: sameStep }) : 'none'}`,
+        'Return { "output": the JSON object this tool returns, "summary": the bullets compiling this result with the earlier tool calls in this step }.'
       ].join('\n\n');
       try {
-        const out = await this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: schemaFor(tool.example), maxTokens: 2000 });
-        return { output: withDemoMode(out), simulated: true };
+        const out = await this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema, maxTokens: 2500 });
+        const summary = (Array.isArray(out.summary) ? out.summary : []).map((b) => String(b || '').trim()).filter(Boolean).slice(0, 10);
+        return { output: withDemoMode(out.output), summary, simulated: true };
       } catch (e) {
         return { output: tool.example, simulated: false, fallback: true, error: e.message || String(e) };
       }

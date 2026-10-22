@@ -45,7 +45,7 @@
       groups: [],
       unseenGuidance: 0,
       tags: [], guidance: [], batch: 0, toolPrefill: {},
-      feed: [], toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false,
+      feed: [], toolRuns: [], suggestedTool: null, agentRequest: null, waitingStep: false, activeStep: null, stepSummary: null,
       scenarioId: null, turnCount: 0, nextSpeaker: 'agent', callerDone: false, agentFollowUp: false, autoplay: false, listening: null, speaking: null, callerThinking: false, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
     };
   }
@@ -86,10 +86,15 @@
   /* ------------------------------------------------------------------ */
   /* State mutations                                                      */
   /* ------------------------------------------------------------------ */
-  function addLine(speaker, text) {
+  /* A line about to be read aloud is `speaking` until its voice ends; the prompts skip it until then. */
+  function addLine(speaker, text, spoken) {
     const line = { id: nextId(), speaker, text, t: elapsed() };
+    if (spoken && willSpeak()) line.speaking = true;
     Store.set((s) => ({ transcript: s.transcript.concat([line]) }));
     return line;
+  }
+  function lineHeard(id) {
+    Store.set((s) => ({ transcript: s.transcript.map((l) => (l.id === id && l.speaking ? Object.assign({}, l, { speaking: false }) : l)) }));
   }
 
   /* A guidance update: its card. */
@@ -98,7 +103,7 @@
     Store.set((s) => {
       const batch = s.batch + 1;
       const t = elapsed();
-      const fresh = cards.map((c) => ({ id: nextId(), batch, t, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()).slice(0, 3) : [], source: c.source || '' }));
+      const fresh = cards.map((c) => ({ id: nextId(), batch, t, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()).slice(0, 3) : [], source: c.source || '', subject: c.subject || '' }));
       return { batch, guidance: s.guidance.concat(fresh).slice(-60), unseenGuidance: s.tab === 'guidance' ? 0 : s.unseenGuidance + fresh.length };
     });
   }
@@ -114,15 +119,23 @@
     Store.set((s) => ({ feed: s.feed.map((r) => (r.id === id ? Object.assign({}, r, typeof patch === 'function' ? patch(r) : patch) : r)) }));
   }
   /* Simulates one call and records it in the transcript and the call's tool history. */
-  async function simulate(tool, inputs) {
+  /* A run belongs to the step whose row it came from, or else to the step the agent started last.
+     The step's results summary at the top of Live Guidance is rebuilt from it. */
+  async function simulate(tool, inputs, step) {
     const s = Store.get();
     const started = Date.now();
-    const res = await AI.simulateTool(tool, inputs, s, userById(s.userId));
+    const res = await AI.simulateTool(tool, inputs, s, userById(s.userId), step);
     if (res.fallback) notify(`Could not simulate ${tool.label}; showing its example output.${res.error ? ' ' + res.error : ''}`);
     const output = res.output || { demo_mode: true };
-    const summary = Object.entries(output).filter(([k]) => k !== 'demo_mode').slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ');
-    addLine('tool', `${tool.label} → ${summary}`);
-    Store.set((st) => ({ toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, t: elapsed() }]) }));
+    const entries = Object.entries(output).filter(([k]) => k !== 'demo_mode');
+    addLine('tool', `${tool.label} → ${entries.slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ')}`);
+    let bullets = res.summary && res.summary.length ? res.summary : null;
+    if (!bullets) {
+      const prev = s.stepSummary && step && s.stepSummary.stepId === step.stepId ? s.stepSummary.bullets : [];
+      bullets = prev.concat(entries.slice(0, 6).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${fmtVal(v)}`));
+    }
+    const stepSummary = { stepId: step ? step.stepId : null, title: step ? step.label : tool.label, bullets, t: elapsed() };
+    Store.set((st) => ({ toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, step, t: elapsed() }]), stepSummary }));
     return { output, ms: Date.now() - started };
   }
 
@@ -185,17 +198,15 @@
     noteToolDone();
   }
 
-  /* Execute: the tool runs, its output shows in the row, and a row opened by a step gets that step's
-     card built on the result. */
+  /* Execute: the tool runs and its output shows in the row. */
   async function runManualRow(rowId) {
     const row = feedRow(rowId);
     const tool = row && toolById(row.tool);
     if (!tool || row.status !== 'draft') return;
     updateRow(rowId, { status: 'running' });
     Store.set((s) => ({ suggestedTool: s.suggestedTool === tool.id ? null : s.suggestedTool }));
-    const { output, ms } = await simulate(tool, row.inputs);
+    const { output, ms } = await simulate(tool, row.inputs, row.step || Store.get().activeStep);
     updateRow(rowId, { status: 'done', output, ms });
-    if (row.step) stepCard(row.step, tool.id);
     finishToolWait(tool.id, true);
     noteToolDone();
   }
@@ -233,8 +244,24 @@
     Store.set((s) => ({ groups: mergeWorkflows(s.groups, res.workflows || []) }));
   }
 
-  /* After an ordinary line only a Caution may appear; a step the agent started gets its own card. */
-  function applyGuidance(res, forStep) {
+  /* A card repeats a recent one when their subjects share most of their words. Only the last few
+     cards count, so a point can come back once the call has moved on to other things. */
+  const RECENT_SUBJECTS = 3;
+  function subjectWords(s) {
+    return new Set(String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 2));
+  }
+  function repeatsRecent(card) {
+    const a = subjectWords(card.subject || card.text);
+    if (!a.size) return false;
+    return (Store.get().guidance || []).slice(-RECENT_SUBJECTS).some((c) => {
+      const b = subjectWords(c.subject || c.text);
+      const shared = [...a].filter((w) => b.has(w)).length;
+      return shared / Math.min(a.size, b.size || 1) >= 0.6;
+    });
+  }
+
+  /* At most one flashcard per update, dropped when it repeats a recent one. */
+  function applyGuidance(res) {
     if (!res || typeof res !== 'object') throw new Error('Empty guidance update');
     const tools = (res.tools || []).filter((t) => t && toolById(t.name));
     const prefill = {};
@@ -248,8 +275,14 @@
       toolPrefill: Object.assign({}, s.toolPrefill, prefill)
     }));
     if (Store.get().callStatus === 'active') fillDraftBlanks();
+    if (res.newest_card_still_applies === false) {
+      Store.set((s) => {
+        const last = s.guidance[s.guidance.length - 1];
+        return last && !last.retired ? { guidance: s.guidance.map((c) => (c.batch === last.batch ? Object.assign({}, c, { retired: true }) : c)) } : {};
+      });
+    }
     const cards = (res.guidance || []).filter((c) => c && c.text && c.kind).slice(0, 1)
-      .filter((c) => forStep || /^caution$/i.test(String(c.kind).trim()));
+      .filter((c) => !repeatsRecent(c));
     pushCards(cards);
   }
 
@@ -301,61 +334,36 @@
     return settling;
   }
 
-  /* The agent starts a workflow step: it turns green, the first tool the step names in
-     system_prompt.md ("Tool: `id`") opens in the feed for the agent to fill in and execute or skip,
-     and the guidance prompt gives one card for the step. Nothing runs until the agent executes. */
-  let stepsRunning = 0;
+  /* The agent starts a workflow step: it turns green and the first tool the step names in
+     system_prompt.md ("Tool: `id`") opens in the feed for the agent to fill in and execute or skip.
+     Nothing runs until the agent executes; a flashcard may follow the result. */
   function runStep(groupId, stepId) {
     const s = Store.get();
     if (s.callStatus !== 'active') { notify('Start the call first.'); return; }
     const g = s.groups.find((x) => x.id === groupId);
     const idx = g ? g.steps.findIndex((st) => st.id === stepId) : -1;
-    if (idx < 0 || g.steps[idx].running) return;
+    if (idx < 0) return;
     const ref = { groupId, stepId, workflow: g.title, label: g.steps[idx].label };
     const tool = AI.stepTools(g.title, idx).map(toolById).find(Boolean);
     updateWorkflowStep(groupId, stepId, { status: 'done', changed: Date.now() });
+    Store.set({ activeStep: ref });
     if (tool) {
       Store.set({ suggestedTool: tool.id, tab: 'guidance' });
       openDraft(tool.id, 'step', null, ref);
-    } else if (stepWait) {
-      stepWaitDone = true;   // a step without a tool is done once its card is in
-    }
-    stepCard(ref, null);
-  }
-
-  /* One guidance card for a step: when it starts, and again after its tool ran (`ranTool`). */
-  async function stepCard(ref, ranTool) {
-    const callStart = Store.get().callStart;
-    const live = () => Store.get().callStatus === 'active' && Store.get().callStart === callStart;
-    if (!AI.available()) return;
-    stepsRunning++;
-    updateWorkflowStep(ref.groupId, ref.stepId, { running: true });
-    Store.set({ aiBusy: true, aiError: '' });
-    try {
-      const res = await AI.guidance(Store.get(), userById(Store.get().userId), { workflow: ref.workflow, step: ref.label, ranTool });
-      if (live()) applyGuidance(res, true);
-    } catch (e) {
-      if (live()) Store.set({ aiError: e.message || String(e) });
-    } finally {
-      stepsRunning--;
-      if (!busyQueues && !stepsRunning) Store.set({ aiBusy: false });
-      if (live()) updateWorkflowStep(ref.groupId, ref.stepId, { running: false });
-      checkStepWait();
+    } else {
+      noteToolDone();   // a step without a tool has nothing to wait for
     }
   }
 
   /* Simulated call: after a line where the agent said it is checking something, the call waits
-     until the human executes or skips a tool and that step's card is in (or chooses to continue). */
+     until the human executes or skips a tool (or chooses to continue). */
   let stepWait = null;
-  let stepWaitDone = false;   // a tool was executed or skipped since the wait began
-  function waitForStep(done) {
+  function waitForStep() {
     finishStepWait();
-    stepWaitDone = !!done;
     Store.set({ waitingStep: true });
     return new Promise((resolve) => { stepWait = resolve; });
   }
-  function noteToolDone() { stepWaitDone = true; checkStepWait(); }
-  function checkStepWait() { if (stepWait && stepWaitDone && !stepsRunning) finishStepWait(); }
+  function noteToolDone() { finishStepWait(); }
   function finishStepWait() {
     if (!stepWait) return;
     const resolve = stepWait;
@@ -406,11 +414,15 @@
     Store.set(Object.assign(freshCall(), { tab: 'guidance', notice: '' }));
   }
 
-  async function speakLine(speaker, text) {
-    if (!Store.get().settings.audio || !TTS.supported) return false;
+  function willSpeak() { return !!(Store.get().settings.audio && TTS.supported); }
+  async function speakLine(speaker, line) {
+    if (!willSpeak()) { lineHeard(line.id); return false; }
     Store.set({ speaking: speaker });
-    try { return await TTS.speak(text, speaker); }
-    finally { if (Store.get().speaking === speaker) Store.set({ speaking: null }); }
+    try { return await TTS.speak(line.text, speaker); }
+    finally {
+      if (Store.get().speaking === speaker) Store.set({ speaking: null });
+      lineHeard(line.id);
+    }
   }
 
   /* The caller's next line is drafted in the background while the screen updates after the agent spoke. */
@@ -442,16 +454,14 @@
     }
     if (!live()) return { played: false };
     const say = String((res && res.say) || '').trim();
-    if (say) {
-      const line = addLine(speaker, say);
-      if (speaker === 'agent') line.handOver = !!res.hand_over;
-    }
+    const line = say ? addLine(speaker, say, true) : null;
+    if (line && speaker === 'agent') line.handOver = !!res.hand_over;
     const callerDone = s.callerDone || (speaker === 'caller' && !!res.end_call);
     /* The call ends on the agent's closing line after the caller has said goodbye. */
     const ending = (speaker === 'agent' && s.callerDone) || s.turnCount + 1 >= MAX_SIM_TURNS;
     const followUp = speaker === 'agent' && s.agentFollowUp;
     Store.set({ turnCount: s.turnCount + 1, nextSpeaker: speaker === 'agent' ? 'caller' : 'agent', callerDone, agentFollowUp: false });
-    if (say) await speakLine(speaker, say);
+    if (line) await speakLine(speaker, line);
     if (!live()) return { played: true };
     const asked = speaker === 'agent' && res.tool ? toolById(String(res.tool).trim()) : null;
     /* The human may already have run it from the copilot's suggestion while the agent was speaking;
@@ -473,16 +483,18 @@
     await settle();
     if (!live()) return { played: true };
     if (speaker === 'agent' && say && !followUp) {
-      /* Anything new since this turn began: a tool result, or a card from a step or a Caution. */
+      /* Anything new since this turn began: a tool result or a flashcard. */
       const fresh = () => Store.get().batch !== s.batch || Store.get().toolRuns.length > s.toolRuns.length;
       const ran = Store.get().toolRuns.length > s.toolRuns.length;
-      if (!handOver && (stepsRunning || !ran)) {
-        await waitForStep(ran);
+      if (!handOver && !ran) {
+        await waitForStep();
+        if (!live()) return { played: true };
+        await settle();   // the flashcard (if any) for the tool the human just ran
         if (!live()) return { played: true };
       }
       const after = Store.get();
       const card = after.guidance[after.guidance.length - 1];
-      const newCaution = after.batch !== s.batch && card && /^caution$/i.test(String(card.kind).trim());
+      const newCaution = after.batch !== s.batch && card && /^(caution|exception)$/i.test(String(card.kind).trim());
       if (handOver ? newCaution : fresh()) {
         callerDraft = null;
         Store.set({ nextSpeaker: 'agent', agentFollowUp: true });
@@ -625,11 +637,11 @@
     if (now.callStatus !== 'active' || now.callStart !== s.callStart) return;
     const say = String((res && res.say) || '').trim();
     if (!say) return;
-    addLine('caller', say);
+    const line = addLine('caller', say, true);
     if (res.end_call) Store.set({ callerDone: true });
-    settle();
     pauseMic();
-    try { await speakLine('caller', say); } finally { resumeMic(); }
+    try { await speakLine('caller', line); } finally { resumeMic(); }
+    if (Store.get().callStatus === 'active' && Store.get().callStart === s.callStart) settle();
   }
 
   /* Live call: mute or unmute the agent's mic; muting sends what was already said. */
@@ -860,7 +872,6 @@
           <span class="gtext">${c.text}</span>
         </div>
         ${c.bullets && c.bullets.length ? html`<ul class="gbullets">${c.bullets.map((b, i) => html`<li key=${i}>${b}</li>`)}</ul>` : ''}
-        ${c.source ? html`<span class="gsrc">${c.source}</span>` : ''}
       </div>`;
   }
 
@@ -872,34 +883,44 @@
     s.guidance.forEach((c) => { if (!byBatch.has(c.batch)) byBatch.set(c.batch, { batch: c.batch, cards: [] }); byBatch.get(c.batch).cards.push(c); });
     const batches = [...byBatch.values()].sort((a, b) => a.batch - b.batch);
     const latest = batches.length ? batches[batches.length - 1].batch : 0;
-    /* Keep only the newest guidance in view: older batches sit above, reachable by scrolling up. */
+    const cleared = batches.length > 0 && batches[batches.length - 1].cards.every((c) => c.retired);
+    const sum = s.callStatus !== 'idle' ? s.stepSummary : null;
+    /* Keep only the newest guidance in view: older batches sit above, reachable by scrolling up.
+       Once the newest no longer applies, it scrolls up too and the box is left empty. */
     useEffect(() => {
       const box = boxRef.current; const last = lastRef.current; const spacer = spacerRef.current;
       if (!box) return;
       if (!last) { if (spacer) spacer.style.height = '0px'; return; }
       const pad = parseFloat(getComputedStyle(box).paddingTop) || 0;
       const lead = 4;                                   /* the newest card sits 4px below the top edge; the previous one is scrolled out */
-      const room = box.clientHeight - lead - pad - last.offsetHeight;
+      const room = cleared ? box.clientHeight : box.clientHeight - lead - pad - last.offsetHeight;
       if (spacer) spacer.style.height = `${Math.max(0, room)}px`;
-      const top = last.offsetTop - lead;
-      try { box.scrollTo({ top, behavior: batches.length > 1 ? 'smooth' : 'auto' }); } catch (e) { box.scrollTop = top; }
-    }, [latest, s.guidance.length, s.aiBusy, s.aiError]);
+      const top = cleared ? last.offsetTop + last.offsetHeight : last.offsetTop - lead;
+      try { box.scrollTo({ top, behavior: batches.length > 1 || cleared ? 'smooth' : 'auto' }); } catch (e) { box.scrollTop = top; }
+    }, [latest, cleared, s.guidance.length, s.aiBusy, s.aiError, sum]);
     return html`
       <div class="guidance">
         <div class="tags">
           <span class="tags-label">Tags:</span>
           ${s.tags.length ? s.tags.map((t) => html`<span key=${t} class="tag">${t}</span>`) : html`<span class="tags-empty">none yet</span>`}
         </div>
+        <div class="gpanel">
+        ${sum && sum.bullets.length ? html`
+          <div class="gsum" key=${sum.t + ':' + sum.title}>
+            <div class="gsum-title">Results · ${sum.title}</div>
+            <ul class="gsum-list">${sum.bullets.map((b, i) => html`<li key=${i}>${b}</li>`)}</ul>
+          </div>` : ''}
         <div class="gbox" ref=${boxRef}>
           ${batches.length
             ? batches.map((b, i) => html`
-              <div key=${b.batch} class=${'gbatch ' + (b.batch === latest ? 'latest' : 'earlier')} ref=${i === batches.length - 1 ? lastRef : null}>
+              <div key=${b.batch} class=${'gbatch ' + (b.batch === latest && !cleared ? 'latest' : 'earlier')} ref=${i === batches.length - 1 ? lastRef : null}>
                 ${b.cards.map((c) => html`<${GuidanceCard} key=${c.id} c=${c} />`)}
               </div>`)
             : html`<div class="gempty">${s.callStatus === 'idle' ? 'Start a call. Only things worth your attention show up here: policy risks, facts the caller needs, offers worth making.' : 'Nothing needs your attention yet.'}</div>`}
           ${s.aiBusy ? html`<div class="gbusy">GPT-5.6 Luna is updating the screen…</div>` : ''}
           ${s.aiError ? html`<div class="gerror">${s.aiError}</div>` : ''}
           <div class="gspacer" ref=${spacerRef}></div>
+        </div>
         </div>
         <${ActionFeed} s=${s} />
       </div>`;
@@ -955,12 +976,10 @@
     if (r.status === 'done') {
       return html`<div class="frow task single"><ul class="tsteps"><${DoneTool} st=${r} /></ul></div>`;
     }
-    const waitedOn = !!(s.agentRequest && s.agentRequest.tool === r.tool);
-    const heading = waitedOn ? 'Agent request' : r.step ? r.step.label : 'Run';
     return html`
       <div class="frow task single">
         <div class="fcell">
-          <div class="io-label">${heading}: <span class="io-tool">${tool.description || tool.label}</span></div>
+          <div class="io-label">${tool.message || tool.label}</div>
           <${Approval} tool=${tool} inputs=${r.inputs} running=${r.status === 'running'} disabled=${s.callStatus === 'idle'}
             onChange=${(inputs) => updateRow(r.id, { inputs, touched: true })}
             onRun=${async () => { const awaited = !!(toolWait && toolWait.tool === r.tool); await runManualRow(r.id); if (!awaited) settle(); }}
