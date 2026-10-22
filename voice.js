@@ -41,6 +41,7 @@
         /* no-speech, network and aborted fall through to onend, which restarts while wanted. */
       };
       r.onend = () => {
+        if (r !== rec) return;   // an older recognizer ending after a quick stop and start
         if (wanted) {
           restartTimer = setTimeout(() => {
             try { rec = makeRec(); rec.start(); } catch (err) { wanted = false; handlers.onError(String(err)); handlers.onState('stopped'); }

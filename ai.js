@@ -11,8 +11,6 @@
 (function (global) {
   'use strict';
 
-  const STEP_STATUS = ['pending', 'done', 'missed'];
-
   const WORKFLOW_SCHEMA = {
     type: 'object',
     properties: {
@@ -23,7 +21,7 @@
           type: 'object',
           properties: {
             name: { type: 'string' },
-            steps: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, status: { type: 'string', enum: STEP_STATUS } }, required: ['label', 'status'], additionalProperties: false } }
+            steps: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false } }
           },
           required: ['name', 'steps'], additionalProperties: false
         }
@@ -60,31 +58,9 @@
           },
           required: ['name', 'inputs'], additionalProperties: false
         }
-      },
-      suggestedTool: { type: 'string', description: 'Name of the one tool the agent should run right now, or "".' },
-      autoTask: { type: 'string', description: 'Short goal of a task to handle now with auto-approved tools, or "".' }
-    },
-    required: ['tags', 'guidance', 'tools', 'suggestedTool', 'autoTask'],
-    additionalProperties: false
-  };
-  const STEP_SCHEMA = {
-    type: 'object',
-    properties: {
-      action: { type: 'string', enum: ['call_tool', 'finish'] },
-      tool: { type: 'string', description: 'Tool to call when action is call_tool, else "".' },
-      inputs: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } }, required: ['name', 'value'], additionalProperties: false } },
-      summary: {
-        type: 'object',
-        description: 'The final finding when action is finish; empty strings and rows otherwise.',
-        properties: {
-          title: { type: 'string' },
-          rows: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' } }, required: ['label', 'value'], additionalProperties: false } },
-          note: { type: 'string' }
-        },
-        required: ['title', 'rows', 'note'], additionalProperties: false
       }
     },
-    required: ['action', 'tool', 'inputs', 'summary'],
+    required: ['tags', 'guidance', 'tools'],
     additionalProperties: false
   };
   const CALLER_SCHEMA = {
@@ -243,18 +219,14 @@
 
   function screenText(state) {
     const wf = state.groups.length
-      ? state.groups.map((g) => `- ${g.title}: ${g.steps.map((s, i) => `${i + 1}. ${s.label} [${s.status}]`).join('; ')}`).join('\n')
+      ? state.groups.map((g) => `- ${g.title}: ${g.steps.map((s, i) => `${i + 1}. ${s.label} [${s.status === 'done' ? 'started by the agent' : 'not started'}]`).join('; ')}`).join('\n')
       : '- none yet';
-    const tasks = (state.feed || []).filter((r) => r.type === 'task');
-    const taskText = tasks.length
-      ? tasks.map((t) => `- "${t.goal}" [${t.status}]${t.summary && t.summary.title ? `: ${t.summary.title}` : ''}`).join('\n')
-      : '- none yet';
-    return `Workflows on screen:\n${wf}\nTags: ${state.tags.join(', ') || 'none'}.\nTasks you already started:\n${taskText}`;
+    return `Workflows on screen:\n${wf}\nTags: ${state.tags.join(', ') || 'none'}.\nTool rows open on screen, not run yet:\n${openToolsText(state)}`;
   }
 
-  function stepsText(task) {
-    const done = task.steps.filter((st) => st.status === 'done' || st.status === 'skipped');
-    return done.length ? done.map((st) => `${st.tool}(${JSON.stringify(st.inputs)}) -> ${st.status === 'skipped' ? 'not run: the human agent skipped it' : JSON.stringify(st.output)}`).join('\n') : 'none yet';
+  function openToolsText(state) {
+    const open = (state.feed || []).filter((r) => r.type === 'manual' && r.status === 'draft');
+    return open.length ? open.map((r) => `- ${r.tool}(${JSON.stringify(r.inputs || {})})${r.step ? ` for the step "${r.step.label}"` : ''}`).join('\n') : '- none';
   }
 
   function kbText() {
@@ -295,6 +267,20 @@
       caller: section('Caller'),
       agent: section('Support agent')
     };
+  }
+
+  /* system_prompt.md workflows: "## Workflow: Name", then numbered steps; each step's tools are its "Tool: `id`" marks. */
+  const normName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  function parseWorkflows(text) {
+    const defs = {};
+    let current = null;
+    stripComments(text || '').split('\n').forEach((line) => {
+      const head = line.match(/^##\s+Workflow:\s*(.+?)\s*$/);
+      if (head) { current = defs[normName(head[1])] = []; return; }
+      if (/^#/.test(line)) { current = null; return; }
+      if (current && /^\d+\.\s/.test(line)) current.push([...line.matchAll(/Tool:\s*`([\w-]+)`/g)].map((m) => m[1]));
+    });
+    return defs;
   }
 
   /* What the caller hears: spoken lines only, from the caller's point of view. */
@@ -348,6 +334,13 @@
       };
       this.tools = parseTools(this.files.tools);
       this.scenarios = this.files.scenarios.map(parseScenario).filter(Boolean);
+      this.workflowDefs = parseWorkflows(this.files.prompts.system_prompt);
+    },
+
+    /* The tools named by step `index` of a workflow in system_prompt.md; [] for an invented workflow. */
+    stepTools(workflow, index) {
+      const steps = (this.workflowDefs || {})[normName(workflow)];
+      return (steps && steps[index]) || [];
     },
 
     async init(settings) {
@@ -425,8 +418,9 @@
       return this.json({ system: buildSystem('phone_assist_workflow', user), user: prompt, schema: WORKFLOW_SCHEMA, maxTokens: 4000 });
     },
 
-    /* Runs at the same time as workflow(): tags, guidance cards, tools and AI tasks. */
-    guidance(state, user) {
+    /* After every line (with workflow()): tags, tool prefill and any Caution. With `step`, the one card
+       for a workflow step: when the agent starts it, or after its tool ran (`step.ranTool`). */
+    guidance(state, user, step) {
       const recent = (state.guidance || []).slice(-10);
       const shown = recent.map((c, i) => `${fmtTime(c.t)} ${c.kind}: ${c.text}${i === recent.length - 1 ? '   <- newest card, still on screen' : ''}`).join('\n') || '(none yet)';
       const prompt = [
@@ -434,7 +428,11 @@
         `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
         `Screen before this update:\n${screenText(state)}`,
         `Guidance already shown (oldest first, [mm:ss] since the call started, same clock as the transcript):\n${shown}`,
-        'Update the guidance and tools for this moment. Return the JSON object.'
+        !step
+          ? 'Update the tags and tools for this moment, including every tool row open on screen. Return a card only for a Caution; otherwise no card. Return the JSON object.'
+          : step.ranTool
+            ? `The agent just ran ${step.ranTool} for the step "${step.step}" of the "${step.workflow}" workflow; its result is the last tool call above. Give the one card for this step built on that result. Return the JSON object.`
+            : `The agent just started the step "${step.step}" of the "${step.workflow}" workflow. Give the one card for this step now. Return the JSON object.`
       ].join('\n\n');
       return this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: GUIDANCE_SCHEMA, maxTokens: 6000 });
     },
@@ -484,23 +482,6 @@
     ask(state, user, question) {
       const prompt = `Call transcript so far:\n${transcriptText(state)}\n\nTool calls so far:\n${toolRunsText(state)}\n\n${screenText(state)}\n\nThe agent asks: ${question}\n\nReturn the JSON object.`;
       return this.json({ system: buildSystem('chat', user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
-    },
-
-    /* One step of a task the phone assist runs on its own: the next tool call, or the final summary. */
-    nextStep(state, user, task, mustFinish) {
-      const allowed = this.tools.filter((t) => t.autoApproved).map((t) => t.id).join(', ') || 'none';
-      const humanOnly = this.tools.filter((t) => !t.autoApproved).map((t) => t.id).join(', ') || 'none';
-      const prompt = [
-        `You are running this task on your own: ${task.goal}`,
-        `Tools you may run on your own (auto_approved=true): ${allowed}\nTools only the human agent may run: ${humanOnly}\nNo other tools exist.`,
-        `Tool calls so far in this task:\n${stepsText(task)}`,
-        `Call transcript so far:\n${transcriptText(state)}`,
-        `Earlier tool calls in this call:\n${toolRunsText(state)}`,
-        mustFinish
-          ? 'Stop now. Return action "finish" with the summary of what you found.'
-          : 'Return the next tool call (action "call_tool", the tool and its inputs, "" for an input you do not know), or action "finish" with the summary once the task is answered.'
-      ].join('\n\n');
-      return this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: STEP_SCHEMA, maxTokens: 3000 });
     },
 
     /* Returns { output, simulated, fallback?, error? }. The example output is the fallback. */

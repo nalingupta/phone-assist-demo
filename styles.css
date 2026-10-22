@@ -64,13 +64,19 @@ h2, h3 { margin: 0; }
 .wf { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .wf-panel { background: var(--panel); border-radius: 8px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; overflow: auto; }
 .wf-group { padding: 4px 6px 6px; border-radius: 6px; }
-.wf-group-title { font-weight: 700; font-size: 15px; padding-left: 26px; }
+.wf-group-title { font-weight: 700; font-size: 15px; padding-left: 58px; }
 .wf-empty { color: var(--muted); font-size: 13.5px; padding: 8px 6px; }
 .wf-step { display: flex; align-items: center; gap: 10px; padding: 3px 6px 3px 2px; border-radius: 6px; margin-left: -2px; }
 .wf-step.pending .wf-label { color: #5a5d66; }
 .wf-step.done .wf-label { color: var(--ok); font-weight: 600; }
-.wf-step.missed { background: #fff1e0; }
-.wf-step.missed .wf-label { color: var(--warn); font-weight: 700; }
+.wf-step.running { background: #e9f0fc; }
+.wf-run { width: 22px; height: 22px; flex: none; border: 1px solid var(--line-2); background: var(--surface); border-radius: 6px; padding: 0; font-size: 10px; line-height: 1; color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
+.wf-run:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wf-run.again { color: var(--muted); font-size: 13px; }
+.wf-run.busy { border-color: transparent; background: transparent; }
+.wf-run .spin { width: 12px; height: 12px; border: 2px solid #bcd3f7; border-top-color: var(--accent); border-radius: 50%; animation: wfspin .8s linear infinite; }
+@keyframes wfspin { to { transform: rotate(360deg); } }
+.rail-link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 12px; font-weight: 600; text-decoration: underline; }
 .wf-step.pop { animation: steppop 1.4s ease-out; }
 .wf-group.pop { animation: grouppop 1.6s ease-out; }
 @keyframes steppop { 0% { background: #fff7cc; transform: translateX(4px); } 35% { background: #fff1a8; } 100% { transform: none; } }
@@ -78,7 +84,6 @@ h2, h3 { margin: 0; }
 .ico { width: 16px; height: 16px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
 .ico.ok { color: var(--ok); }
 .ico.pend { border: 1.5px solid var(--line-2); border-radius: 50%; width: 13px; height: 13px; margin: 0 1.5px; }
-.ico.miss { background: var(--warn); color: #fff; border-radius: 50%; font-size: 11px; font-weight: 800; font-family: var(--mono); width: 15px; height: 15px; }
 .wf-label { font-size: 14.5px; }
 
 /* tools */
@@ -132,10 +137,6 @@ h2, h3 { margin: 0; }
 .dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: dotbounce 1.2s infinite ease-in-out; }
 .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
 @keyframes dotbounce { 0%, 80%, 100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
-.gfind { font-size: 14px; line-height: 1.45; padding: 2px 14px 0 18px; display: flex; flex-direction: column; gap: 3px; }
-.kw-find { color: var(--accent); }
-.gfrows { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 13px; color: var(--muted); }
-.gfrows b { font-weight: 600; color: var(--fg); }
 .gsrc { align-self: flex-start; font-size: 11.5px; color: var(--muted); background: var(--panel); border-radius: 4px; padding: 1px 6px; }
 .gempty, .gbusy, .gerror, .io-wait { color: var(--muted); font-size: 14px; }
 .gbusy { color: var(--accent); }
@@ -191,8 +192,7 @@ h2, h3 { margin: 0; }
 .approve-actions .btn-dark, .approve-actions .btn-plain { font-size: 14px; padding: 10px 20px; min-width: 96px; }
 .approve-actions .btn-plain { padding: 9px 20px; }
 .approve-running { color: var(--accent); font-size: 14px; display: inline-flex; align-items: baseline; }
-.tstep-approve { list-style: none; }
-.tskip { font-size: 12px; color: var(--muted); background: var(--panel); border-radius: 999px; padding: 1px 8px; }
+.tstep-of { color: var(--muted); }
 .tstep.skipped .tdot { border-color: var(--line-2); }
 .rail-field { display: flex; flex-direction: column; gap: 4px; }
 .rail-field-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }

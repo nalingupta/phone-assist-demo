@@ -1,17 +1,16 @@
 <!-- Demo tools. Each "tool_name( ... ) -> output" block defines a mock tool the agent can call.
        desc:    (optional) what the tool does — helps the model decide when to call it
        input:   (optional) comma-separated argument names; a trailing ? marks an optional
-                one ("store, date?"). A required input that is unknown makes the AI
-                pause and ask the agent to fill it in.
+                one ("store, date?"). Unknown inputs stay blank for the agent to fill in.
        message: (optional) status text shown while the tool runs ("Checking insurance")
        dynamic: (optional) true = an AI generates the result at call time so it fits
                 the conversation; the output after -> becomes the format to imitate AND
                 the fallback if generation fails. Set false to always return the output
                 verbatim.
-       auto_approved: true = the AI may run the tool on its own. false = only the human
-                agent can run it (Execute); the AI may only suggest it. Use false for
-                anything that contacts the customer or commits something for them.
-                Omitted means false.
+       auto_approved: true = a read-only lookup. false = it contacts the customer or
+                commits something for them; in a simulated call the agent AI may ask
+                for these. Every tool, either way, runs only when the human agent
+                presses it after starting a workflow step. Omitted means false.
        output:  everything after "->" until the next block: the text returned to the
                 model, written as pretty-printed multi-line JSON. Static when dynamic
                 is off; the example format when dynamic is on.
