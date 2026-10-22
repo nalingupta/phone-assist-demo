@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds artifact.html: the same page as index.html with the CSS and JS inlined,
 # in the form the claude.ai Artifact tool wraps (no doctype/head/body of its own).
-# The prompt files, tools.md and kb/*.md are inlined as window.PROMPT_FILES.
+# The prompt files, tools.md, kb/*.md and scenarios/*.md are inlined as window.PROMPT_FILES.
 set -e
 cd "$(dirname "$0")"
 for f in data.js ai.js voice.js tts.js app.js; do
@@ -12,9 +12,9 @@ prompt_files() {
     const fs = require("fs");
     const read = (f) => { try { return fs.readFileSync(f, "utf8"); } catch (e) { return ""; } };
     const prompts = {};
-    for (const n of ["system_prompt", "phone_assist", "phone_assist_best_reply", "chat"]) prompts[n] = read(`prompts/${n}.md`);
-    const kb = fs.readdirSync("kb").filter((f) => f.endsWith(".md")).sort().map((file) => ({ file, text: read(`kb/${file}`) }));
-    const json = JSON.stringify({ prompts, tools: read("tools.md"), kb }).replace(/</g, "\\u003c");
+    for (const n of ["system_prompt", "phone_assist_workflow", "phone_assist_guidance", "phone_assist_best_reply", "chat", "caller", "support_agent"]) prompts[n] = read(`prompts/${n}.md`);
+    const folder = (d) => fs.readdirSync(d).filter((f) => f.endsWith(".md")).sort().map((file) => ({ file, text: read(`${d}/${file}`) }));
+    const json = JSON.stringify({ prompts, tools: read("tools.md"), kb: folder("kb"), scenarios: folder("scenarios") }).replace(/</g, "\\u003c");
     process.stdout.write(`window.PROMPT_FILES = ${json};`);
   '
 }

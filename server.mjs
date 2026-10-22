@@ -1,7 +1,7 @@
 /* Phone Assist demo server.
    Serves the static demo and keeps the API keys on the server side:
      POST /api/llm     -> GPT-5.6 Luna with structured JSON output
-     GET  /api/prompts -> prompts/*.md, tools.md and kb/*.md as text
+     GET  /api/prompts -> prompts/*.md, tools.md, kb/*.md and scenarios/*.md as text
      POST /api/tts    -> ElevenLabs text to speech (audio/mpeg)
      GET  /api/config -> which services are configured
    Environment: OPENAI_API_KEY, ELEVENLABS_API_KEY, optional OPENAI_MODEL,
@@ -123,21 +123,23 @@ async function handleLlm(req, res) {
 }
 
 /* ---------------- prompt files ---------------- */
-const PROMPT_FILES = ['system_prompt', 'phone_assist', 'phone_assist_best_reply', 'chat'];
+const PROMPT_FILES = ['system_prompt', 'phone_assist_workflow', 'phone_assist_guidance', 'phone_assist_best_reply', 'chat', 'caller', 'support_agent'];
 
 function readText(rel) {
   try { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch (e) { return ''; }
 }
 
 /* Read from disk on every request so an edit only needs a page refresh. */
+function readFolder(dir) {
+  try {
+    return fs.readdirSync(path.join(ROOT, dir)).filter((f) => f.endsWith('.md')).sort().map((file) => ({ file, text: readText(`${dir}/${file}`) }));
+  } catch (e) { return []; }
+}
+
 function loadPromptFiles() {
   const prompts = {};
   for (const name of PROMPT_FILES) prompts[name] = readText(`prompts/${name}.md`);
-  let kb = [];
-  try {
-    kb = fs.readdirSync(path.join(ROOT, 'kb')).filter((f) => f.endsWith('.md')).sort().map((file) => ({ file, text: readText(`kb/${file}`) }));
-  } catch (e) { kb = []; }
-  return { prompts, tools: readText('tools.md'), kb };
+  return { prompts, tools: readText('tools.md'), kb: readFolder('kb'), scenarios: readFolder('scenarios') };
 }
 
 async function handleTts(req, res) {

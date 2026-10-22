@@ -4,15 +4,16 @@
    2. "sample": the page runs inside a claude.ai artifact viewer and uses the
       viewer's own Claude access (no API key). That host cannot call OpenAI.
    Every prompt is assembled from the files: prompts/system_prompt.md plus one
-   personality file (phone_assist.md, phone_assist_best_reply.md or chat.md),
-   with tools.md, kb/*.md and the customer record attached as reference. */
+   task file (phone_assist_workflow.md, phone_assist_guidance.md,
+   phone_assist_best_reply.md, chat.md or support_agent.md),
+   with tools.md, kb/*.md and the customer record attached as reference.
+   The simulated caller gets only caller.md and its scenarios/*.md section. */
 (function (global) {
   'use strict';
 
   const STEP_STATUS = ['pending', 'done', 'missed'];
-  const GUIDANCE_KINDS = ['say', 'ask', 'tell', 'info', 'do', 'recommendation', 'caution'];
 
-  const ANALYSIS_SCHEMA = {
+  const WORKFLOW_SCHEMA = {
     type: 'object',
     properties: {
       workflows: {
@@ -26,14 +27,21 @@
           },
           required: ['name', 'steps'], additionalProperties: false
         }
-      },
+      }
+    },
+    required: ['workflows'],
+    additionalProperties: false
+  };
+  const GUIDANCE_SCHEMA = {
+    type: 'object',
+    properties: {
       tags: { type: 'array', items: { type: 'string' } },
       guidance: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: GUIDANCE_KINDS },
+            kind: { type: 'string', description: 'The guidance type name defined in your instructions.' },
             text: { type: 'string' },
             bullets: { type: 'array', items: { type: 'string' } },
             source: { type: 'string' }
@@ -53,11 +61,49 @@
           required: ['name', 'inputs'], additionalProperties: false
         }
       },
-      suggestedTool: { type: 'string', description: 'Name of the one tool to run right now, or "".' }
+      suggestedTool: { type: 'string', description: 'Name of the one tool the agent should run right now, or "".' },
+      autoTask: { type: 'string', description: 'Short goal of a task to handle now with auto-approved tools, or "".' }
     },
-    required: ['workflows', 'tags', 'guidance', 'tools', 'suggestedTool'],
+    required: ['tags', 'guidance', 'tools', 'suggestedTool', 'autoTask'],
     additionalProperties: false
   };
+  const STEP_SCHEMA = {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['call_tool', 'finish'] },
+      tool: { type: 'string', description: 'Tool to call when action is call_tool, else "".' },
+      inputs: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } }, required: ['name', 'value'], additionalProperties: false } },
+      summary: {
+        type: 'object',
+        description: 'The final finding when action is finish; empty strings and rows otherwise.',
+        properties: {
+          title: { type: 'string' },
+          rows: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' } }, required: ['label', 'value'], additionalProperties: false } },
+          note: { type: 'string' }
+        },
+        required: ['title', 'rows', 'note'], additionalProperties: false
+      }
+    },
+    required: ['action', 'tool', 'inputs', 'summary'],
+    additionalProperties: false
+  };
+  const CALLER_SCHEMA = {
+    type: 'object',
+    properties: { say: { type: 'string' }, end_call: { type: 'boolean' } },
+    required: ['say', 'end_call'], additionalProperties: false
+  };
+  const AGENT_SCHEMA = {
+    type: 'object',
+    properties: {
+      say: { type: 'string' },
+      tool: { type: 'string' },
+      inputs: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } }, required: ['name', 'value'], additionalProperties: false } },
+      end_call: { type: 'boolean' },
+      hand_over: { type: 'boolean' }
+    },
+    required: ['say', 'tool', 'inputs', 'end_call', 'hand_over'], additionalProperties: false
+  };
+
   const REPLY_SCHEMA = {
     type: 'object',
     properties: { reply: { type: 'string' }, why: { type: 'string' } },
@@ -130,7 +176,12 @@
         description: String(args.desc || ''),
         message: String(args.message || ''),
         dynamic: args.dynamic !== false,
-        inputs: String(args.input || '').split(',').map((s) => s.trim()).filter(Boolean).map((key) => ({ key, label: labelFor(key) })),
+        autoApproved: args.auto_approved === true,
+        inputs: String(args.input || '').split(',').map((s) => s.trim()).filter(Boolean).map((raw) => {
+          const optional = raw.endsWith('?');
+          const key = optional ? raw.slice(0, -1).trim() : raw;
+          return { key, label: labelFor(key), optional };
+        }),
         example: withDemoMode(example)
       });
     }
@@ -152,6 +203,9 @@
   }
 
   /* ---------------- prompt pieces ---------------- */
+  /* The demo's fixed "today", so every prompt and the mock records agree on dates. */
+  const DEMO_TODAY = "# Today\nToday is Thursday, October 22, 2026 (10/22/2026). The call is happening now, in the early afternoon.";
+
   function customerText(user) {
     if (!user) return 'No customer record selected.';
     const rx = user.prescriptions.map((p) => `  - Rx ${p.rx}: ${p.drug}, ${p.sig}, qty ${p.qty}/${p.days} days, ${p.refills} refills left, last fill ${p.lastFill}, prescriber ${p.prescriber}. Status: ${p.status}`).join('\n');
@@ -161,7 +215,7 @@
       `Name: ${user.name}; DOB ${user.dob}; phone ${user.phone}; email ${user.email}; preferred contact ${user.preferredContact}.`,
       `Preferred store: ${user.store.name} ${user.store.id}, ${user.store.address}, hours ${user.store.hours}.`,
       `Insurance: ${user.insurance.plan}, member ${user.insurance.memberId}, status ${user.insurance.status}, copay ${user.insurance.copay30} per 30 days or ${user.insurance.copay90} per 90 days.`,
-      `Prescriptions:\n${rx}`,
+      `Prescriptions (all on file at ${user.store.name} ${user.store.id}):\n${rx}`,
       `Allergies: ${user.allergies.join(', ')}. Immunizations: ${imm}.`,
       `Previous interactions: ${past || 'none'}.`,
       `Notes: ${user.notes}`
@@ -191,7 +245,16 @@
     const wf = state.groups.length
       ? state.groups.map((g) => `- ${g.title}: ${g.steps.map((s, i) => `${i + 1}. ${s.label} [${s.status}]`).join('; ')}`).join('\n')
       : '- none yet';
-    return `Workflows on screen:\n${wf}\nTags: ${state.tags.join(', ') || 'none'}.`;
+    const tasks = (state.feed || []).filter((r) => r.type === 'task');
+    const taskText = tasks.length
+      ? tasks.map((t) => `- "${t.goal}" [${t.status}]${t.summary && t.summary.title ? `: ${t.summary.title}` : ''}`).join('\n')
+      : '- none yet';
+    return `Workflows on screen:\n${wf}\nTags: ${state.tags.join(', ') || 'none'}.\nTasks you already started:\n${taskText}`;
+  }
+
+  function stepsText(task) {
+    const done = task.steps.filter((st) => st.status === 'done' || st.status === 'skipped');
+    return done.length ? done.map((st) => `${st.tool}(${JSON.stringify(st.inputs)}) -> ${st.status === 'skipped' ? 'not run: the human agent skipped it' : JSON.stringify(st.output)}`).join('\n') : 'none yet';
   }
 
   function kbText() {
@@ -203,6 +266,7 @@
   function buildSystem(personality, user) {
     const p = AI.files.prompts;
     return [
+      DEMO_TODAY,
       stripComments(p.system_prompt),
       stripComments(p[personality]),
       `# Tools (tools.md)\n${stripComments(AI.files.tools) || '(no tools)'}`,
@@ -212,7 +276,43 @@
   }
 
   /* ---------------- backends ---------------- */
-  const EMPTY_FILES = { prompts: {}, tools: '', kb: [] };
+  const EMPTY_FILES = { prompts: {}, tools: '', kb: [], scenarios: [] };
+
+  /* scenarios/*.md: "# Title", "customer: <id>", then "## Caller" and "## Support agent" sections. */
+  function parseScenario({ file, text }) {
+    const body = stripComments(text || '');
+    const customer = (body.match(/^customer:\s*(\S+)/m) || [])[1];
+    if (!customer) return null;
+    const section = (name) => {
+      const m = body.match(new RegExp(`^##\\s+${name}\\s*$([\\s\\S]*?)(?=^##\\s|(?![\\s\\S]))`, 'mi'));
+      return m ? m[1].trim() : '';
+    };
+    return {
+      id: file.replace(/\.md$/, ''),
+      file,
+      title: ((body.match(/^#\s+(.+)$/m) || [])[1] || file).trim(),
+      customer,
+      caller: section('Caller'),
+      agent: section('Support agent')
+    };
+  }
+
+  /* What the caller hears: spoken lines only, from the caller's point of view. */
+  function callerTranscript(state) {
+    const lines = state.transcript.filter((l) => l.speaker === 'caller' || l.speaker === 'agent');
+    return lines.length ? lines.map((l) => `${l.speaker === 'caller' ? 'YOU' : 'AGENT'}: ${l.text}`).join('\n') : '(the call has just connected)';
+  }
+
+  /* Messages the human-only tools sent to the caller's phone (passcodes, confirmations). */
+  function phoneTexts(state) {
+    const sent = (state.toolRuns || []).filter((r) => (r.tool === 'send_otp' || r.tool === 'send_confirmation') && r.output);
+    if (!sent.length) return '(no texts yet)';
+    return sent.map((r) => {
+      const o = r.output;
+      if (r.tool === 'send_otp') return `- Walgreens: your one-time passcode is ${o.code_demo_only || o.code || '(unreadable)'}.`;
+      return `- ${o.channel || 'Message'}: ${o.message || 'Walgreens confirmation'}`;
+    }).join('\n');
+  }
 
   const AI = {
     mode: 'none',          // 'server' | 'sample' | 'none'
@@ -220,6 +320,7 @@
     server: null,          // /api/config answer when a demo server is behind this page
     files: EMPTY_FILES,    // prompts/*.md, tools.md and kb/*.md
     tools: [],             // tools parsed from tools.md
+    scenarios: [],         // scenarios parsed from scenarios/*.md
     settings: {},
     listeners: new Set(),
 
@@ -242,9 +343,11 @@
       this.files = {
         prompts: (files && files.prompts) || {},
         tools: (files && files.tools) || '',
-        kb: Array.isArray(files && files.kb) ? files.kb : []
+        kb: Array.isArray(files && files.kb) ? files.kb : [],
+        scenarios: Array.isArray(files && files.scenarios) ? files.scenarios : []
       };
       this.tools = parseTools(this.files.tools);
+      this.scenarios = this.files.scenarios.map(parseScenario).filter(Boolean);
     },
 
     async init(settings) {
@@ -311,16 +414,66 @@
       throw new Error('No AI model is connected.');
     },
 
-    analyze(state, user) {
-      const shown = (state.guidance || []).slice(-8).map((c) => `- [${c.kind}] ${c.text}`).join('\n') || '- none';
+    /* Runs at the same time as guidance(): only the workflow panel. */
+    workflow(state, user) {
+      const prompt = [
+        `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}`,
+        `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
+        `Workflow panel before this update:\n${screenText(state)}`,
+        'Update the workflow panel for this moment. Return the JSON object.'
+      ].join('\n\n');
+      return this.json({ system: buildSystem('phone_assist_workflow', user), user: prompt, schema: WORKFLOW_SCHEMA, maxTokens: 4000 });
+    },
+
+    /* Runs at the same time as workflow(): tags, guidance cards, tools and AI tasks. */
+    guidance(state, user) {
+      const recent = (state.guidance || []).slice(-10);
+      const shown = recent.map((c, i) => `${fmtTime(c.t)} ${c.kind}: ${c.text}${i === recent.length - 1 ? '   <- newest card, still on screen' : ''}`).join('\n') || '(none yet)';
       const prompt = [
         `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}`,
         `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
         `Screen before this update:\n${screenText(state)}`,
-        `Cards already on screen (do not repeat them):\n${shown}`,
-        'Update the screen for this moment. Return the JSON object.'
+        `Guidance already shown (oldest first, [mm:ss] since the call started, same clock as the transcript):\n${shown}`,
+        'Update the guidance and tools for this moment. Return the JSON object.'
       ].join('\n\n');
-      return this.json({ system: buildSystem('phone_assist', user), user: prompt, schema: ANALYSIS_SCHEMA, maxTokens: 8000 });
+      return this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: GUIDANCE_SCHEMA, maxTokens: 6000 });
+    },
+
+    /* Simulated call: the caller's next line. Sees only its scenario, what was said and its phone's texts. */
+    callerTurn(state, scenario) {
+      const system = [DEMO_TODAY, stripComments(this.files.prompts.caller || ''), `# Your scenario\n${scenario.caller}`].join('\n\n---\n\n');
+      const prompt = [
+        `The call so far:\n${callerTranscript(state)}`,
+        `Texts on your phone:\n${phoneTexts(state)}`,
+        'Say your next line. Return the JSON object.'
+      ].join('\n\n');
+      return this.json({ system, user: prompt, schema: CALLER_SCHEMA, maxTokens: 1500 });
+    },
+
+    /* Simulated call: the support agent's next line, driven by the guidance on screen. */
+    agentTurn(state, user, scenario) {
+      const lastAgent = [...state.transcript].reverse().find((l) => l.speaker === 'agent');
+      const card = (state.guidance || [])[state.guidance.length - 1];
+      const cardText = card
+        ? `${fmtTime(card.t)} ${card.kind}: ${card.text}${(card.bullets || []).length ? `\n${card.bullets.map((b) => `  - ${b}`).join('\n')}` : ''}${card.source ? `\n(source: ${card.source})` : ''}\n${!lastAgent || card.t >= lastAgent.t ? 'This card appeared since your last line: act on it.' : 'This card was already on screen before your last line.'}`
+        : '(no card on screen)';
+      const humanTools = this.tools.filter((t) => !t.autoApproved).map((t) => `- ${t.id}(${t.inputs.map((f) => f.key + (f.optional ? '?' : '')).join(', ')}): ${t.description}`).join('\n');
+      const suggested = state.suggestedTool ? `The copilot suggests running ${state.suggestedTool} now.` : 'No tool is suggested right now.';
+      const prompt = [
+        `Call transcript so far (oldest first, [mm:ss] SPEAKER):\n${transcriptText(state)}`,
+        `Tool calls so far (name(inputs) -> output):\n${toolRunsText(state)}`,
+        `Your screen:\n${screenText(state)}`,
+        `Earlier guidance this call (oldest first, background only):\n${(state.guidance || []).slice(-6, -1).map((c) => `${fmtTime(c.t)} ${c.kind}: ${c.text}`).join('\n') || '(none)'}`,
+        `Live Guidance card on screen:\n${cardText}`,
+        `Tools only you can run:\n${humanTools}\n${suggested}`,
+        `Your scenario notes:\n${scenario.agent || '(none)'}`,
+        state.callerDone
+          ? 'The caller has said goodbye: this is your closing line. Return the JSON object.'
+          : state.agentFollowUp
+            ? 'You still have the floor: the caller has not spoken since your last line, and new lookup results or a Caution arrived while you were working. Continue your own turn now and deliver what is new (do not greet again). Never repeat or reword a question or statement from your last line; if the new results and card add nothing you have not already said, return say "" and the caller will speak. Return the JSON object.'
+            : 'Say your next line. Return the JSON object.'
+      ].join('\n\n');
+      return this.json({ system: buildSystem('support_agent', user), user: prompt, schema: AGENT_SCHEMA, maxTokens: 2000 });
     },
 
     bestReply(state, user) {
@@ -331,6 +484,23 @@
     ask(state, user, question) {
       const prompt = `Call transcript so far:\n${transcriptText(state)}\n\nTool calls so far:\n${toolRunsText(state)}\n\n${screenText(state)}\n\nThe agent asks: ${question}\n\nReturn the JSON object.`;
       return this.json({ system: buildSystem('chat', user), user: prompt, schema: ANSWER_SCHEMA, maxTokens: 2000 });
+    },
+
+    /* One step of a task the phone assist runs on its own: the next tool call, or the final summary. */
+    nextStep(state, user, task, mustFinish) {
+      const allowed = this.tools.filter((t) => t.autoApproved).map((t) => t.id).join(', ') || 'none';
+      const humanOnly = this.tools.filter((t) => !t.autoApproved).map((t) => t.id).join(', ') || 'none';
+      const prompt = [
+        `You are running this task on your own: ${task.goal}`,
+        `Tools you may run on your own (auto_approved=true): ${allowed}\nTools only the human agent may run: ${humanOnly}\nNo other tools exist.`,
+        `Tool calls so far in this task:\n${stepsText(task)}`,
+        `Call transcript so far:\n${transcriptText(state)}`,
+        `Earlier tool calls in this call:\n${toolRunsText(state)}`,
+        mustFinish
+          ? 'Stop now. Return action "finish" with the summary of what you found.'
+          : 'Return the next tool call (action "call_tool", the tool and its inputs, "" for an input you do not know), or action "finish" with the summary once the task is answered.'
+      ].join('\n\n');
+      return this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: STEP_SCHEMA, maxTokens: 3000 });
     },
 
     /* Returns { output, simulated, fallback?, error? }. The example output is the fallback. */
@@ -345,7 +515,7 @@
         'Return the JSON object this tool returns.'
       ].join('\n\n');
       try {
-        const out = await this.json({ system: buildSystem('phone_assist', user), user: prompt, schema: schemaFor(tool.example), maxTokens: 2000 });
+        const out = await this.json({ system: buildSystem('phone_assist_guidance', user), user: prompt, schema: schemaFor(tool.example), maxTokens: 2000 });
         return { output: withDemoMode(out), simulated: true };
       } catch (e) {
         return { output: tool.example, simulated: false, fallback: true, error: e.message || String(e) };
@@ -369,6 +539,5 @@
     }
   }
 
-  AI.GUIDANCE_KINDS = GUIDANCE_KINDS;
   global.AI = AI;
 })(window);

@@ -11,7 +11,7 @@
   /* Settings                                                            */
   /* ------------------------------------------------------------------ */
   const SETTINGS_KEY = 'phoneAssistDemo.settings.v2';
-  const DEFAULT_SETTINGS = { apiKey: '', model: 'gpt-5.6-luna', effort: 'low', baseUrl: '', tier: 'quick', audio: true };
+  const DEFAULT_SETTINGS = { apiKey: '', model: 'gpt-5.6-luna', effort: 'low', baseUrl: '', tier: 'quick', audio: true, toolMode: 'auto' };
   function loadSettings() {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
@@ -25,18 +25,18 @@
   /* ------------------------------------------------------------------ */
   let uid = 0;
   const nextId = () => ++uid;
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const userById = (id) => D.USERS.find((u) => u.id === id) || D.USERS[0];
   const toolById = (id) => AI.tools.find((t) => t.id === id);
-  const defaultTools = () => AI.tools.slice(0, 6).map((t) => t.id);
-  const MAX_AUTO_TOOLS_PER_TURN = 3;
+  const MAX_SIM_TURNS = 40;            // simulated call: hard stop if neither side ends it
+  const MAX_TASKS_PER_TURN = 2;
+  const MAX_TASK_STEPS = 6;
   const STEP_STATUS = ['pending', 'done', 'missed'];
   const fmtVal = (v) => {
     if (v == null) return '';
     if (Array.isArray(v)) return v.map((x) => (x && typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ');
     return typeof v === 'object' ? JSON.stringify(v) : String(v);
   };
-  const scenarioById = (id) => D.SCENARIOS.find((sc) => sc.id === id) || null;
+  const scenarioById = (id) => AI.scenarios.find((sc) => sc.id === id) || null;
   const pickRandom = (list, notId) => {
     const pool = list.length > 1 ? list.filter((x) => x.id !== notId) : list;
     return pool[Math.floor(Math.random() * pool.length)];
@@ -47,15 +47,15 @@
       callStatus: 'idle', callStart: null, transcript: [], interim: '',
       groups: [],
       unseenGuidance: 0,
-      tags: [], guidance: [], batch: 0, tools: defaultTools(), toolPrefill: {},
-      selectedTool: null, toolInputs: {}, toolBusy: false, toolResult: null, toolRuns: [], suggestedTool: null,
-      scenarioId: null, scriptIndex: 0, autoplay: false, listening: null, speaking: null, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
+      tags: [], guidance: [], findings: [], pendingFindings: [], batch: 0, toolPrefill: {},
+      feed: [], toolRuns: [], suggestedTool: null, agentRequest: null, pendingTask: '',
+      scenarioId: null, turnCount: 0, nextSpeaker: 'agent', callerDone: false, agentFollowUp: false, autoplay: false, listening: null, speaking: null, aiBusy: false, aiError: '', bestBusy: false, askBusy: false
     };
   }
 
   const Store = (() => {
     let state = Object.assign(freshCall(), {
-      userId: pickRandom(D.USERS).id, incoming: 'random', mode: 'scripted', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
+      userId: pickRandom(D.USERS).id, incoming: 'random', scenarioPick: 'random', mode: 'simulated', tab: 'guidance', settings: loadSettings(), settingsOpen: false,
       aiStatus: AI.status(), notice: '', voiceError: ''
     });
     const subs = new Set();
@@ -95,36 +95,211 @@
     return line;
   }
 
+  /* A guidance update: its card plus the conclusions of tasks that finished since the last one, shown together. */
   function pushCards(cards) {
-    if (!cards || !cards.length) return;
+    cards = cards || [];
+    if (!cards.length && !Store.get().pendingFindings.length) return;
     Store.set((s) => {
       const batch = s.batch + 1;
-      const fresh = cards.map((c) => ({ id: nextId(), batch, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()).slice(0, 3) : [], source: c.source || '' }));
-      return { batch, guidance: s.guidance.concat(fresh).slice(-60), unseenGuidance: s.tab === 'guidance' ? 0 : s.unseenGuidance + fresh.length };
+      const t = elapsed();
+      const fresh = cards.map((c) => ({ id: nextId(), batch, t, kind: c.kind, text: c.text, bullets: Array.isArray(c.bullets) ? c.bullets.filter((b) => typeof b === 'string' && b.trim()).slice(0, 3) : [], source: c.source || '' }));
+      const found = s.pendingFindings.map((f) => Object.assign({}, f, { batch, t }));
+      const added = fresh.length + found.length;
+      return { batch, guidance: s.guidance.concat(fresh).slice(-60), findings: s.findings.concat(found).slice(-60), pendingFindings: [], unseenGuidance: s.tab === 'guidance' ? 0 : s.unseenGuidance + added };
     });
   }
 
-  function selectTool(id) {
-    const tool = toolById(id);
-    if (!tool) return;
-    const prefill = Store.get().toolPrefill[id] || {};
-    const inputs = {};
-    tool.inputs.forEach((f) => { inputs[f.key] = prefill[f.key] || ''; });
-    Store.set((st) => ({ selectedTool: id, toolInputs: inputs, toolResult: null, tab: 'guidance', suggestedTool: st.suggestedTool === id ? null : st.suggestedTool }));
+  function addFinding(summary) {
+    if (!summary || (!summary.title && !(summary.rows || []).length)) return;
+    const rows = (summary.rows || []).filter((r) => r && r.label && r.value);
+    Store.set((s) => ({ pendingFindings: s.pendingFindings.concat([{ id: nextId(), title: summary.title || '', rows }]) }));
   }
 
-  async function runTool(id, inputs) {
-    const tool = toolById(id);
-    if (!tool) return null;
-    Store.set((st) => ({ selectedTool: id, toolInputs: inputs, toolResult: null, toolBusy: true, tab: 'guidance', suggestedTool: st.suggestedTool === id ? null : st.suggestedTool }));
+  /* ---------------- action feed: manual tool rows and AI task rows ---------------- */
+  const prefilledInputs = (tool, values) => {
+    const inputs = {};
+    tool.inputs.forEach((f) => { inputs[f.key] = (values && values[f.key]) || ''; });
+    return inputs;
+  };
+  const missingInputs = (tool, inputs) => tool.inputs.filter((f) => !f.optional && !String(inputs[f.key] || '').trim()).map((f) => f.key);
+  const feedRow = (id) => Store.get().feed.find((r) => r.id === id);
+  function updateRow(id, patch) {
+    Store.set((s) => ({ feed: s.feed.map((r) => (r.id === id ? Object.assign({}, r, typeof patch === 'function' ? patch(r) : patch) : r)) }));
+  }
+  function updateStep(taskId, stepId, patch) {
+    updateRow(taskId, (r) => ({ steps: r.steps.map((st) => (st.id === stepId ? Object.assign({}, st, patch) : st)) }));
+  }
+
+  /* Simulates one call and records it in the transcript and the call's tool history. */
+  async function simulate(tool, inputs) {
     const s = Store.get();
+    const started = Date.now();
     const res = await AI.simulateTool(tool, inputs, s, userById(s.userId));
     if (res.fallback) notify(`Could not simulate ${tool.label}; showing its example output.${res.error ? ' ' + res.error : ''}`);
     const output = res.output || { demo_mode: true };
     const summary = Object.entries(output).filter(([k]) => k !== 'demo_mode').slice(0, 2).map(([k, v]) => `${k}: ${fmtVal(v)}`).join(' · ');
     addLine('tool', `${tool.label} → ${summary}`);
-    Store.set((st) => ({ toolBusy: false, toolResult: output, toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, t: elapsed() }]) }));
-    return { output };
+    Store.set((st) => ({ toolRuns: st.toolRuns.concat([{ id: nextId(), tool: tool.id, inputs, output, t: elapsed() }]) }));
+    return { output, ms: Date.now() - started };
+  }
+
+  /* Opens a human-only tool's input row, prefilled, so the agent only has to press Execute.
+     `auto` is 'agent' (the agent AI asked for it) or 'suggested' (the copilot suggested it). */
+  function openDraft(id, auto, values) {
+    const tool = toolById(id);
+    if (!tool) return;
+    Store.set((s) => {
+      const draft = s.feed.find((r) => r.type === 'manual' && r.tool === id && r.status === 'draft');
+      const filled = prefilledInputs(tool, Object.assign({}, s.toolPrefill[id], values));
+      if (draft) {
+        const inputs = Object.assign({}, draft.inputs);
+        if (!draft.touched) Object.entries(filled).forEach(([k, v]) => { if (v) inputs[k] = v; });
+        return { feed: s.feed.map((r) => (r.id === draft.id ? Object.assign({}, r, { inputs, auto: auto === 'agent' ? 'agent' : r.auto }) : r)) };
+      }
+      return { feed: s.feed.concat([{ id: nextId(), type: 'manual', tool: id, by: 'agent', auto, touched: false, status: 'draft', inputs: filled }]) };
+    });
+  }
+
+  /* A new guidance update: fill blanks in open rows and open the newly suggested tool below them.
+     Open rows stay until the agent executes or skips them. */
+  function syncSuggestedDrafts(suggested) {
+    Store.set((s) => ({
+      feed: s.feed.map((r) => {
+        if (r.type !== 'manual' || r.status !== 'draft' || r.touched) return r;
+        const tool = toolById(r.tool);
+        const pre = s.toolPrefill[r.tool] || {};
+        const inputs = Object.assign({}, r.inputs);
+        tool.inputs.forEach((f) => { if (!String(inputs[f.key] || '').trim() && pre[f.key]) inputs[f.key] = pre[f.key]; });
+        return Object.assign({}, r, { inputs });
+      })
+    }));
+    if (suggested && !Store.get().toolRuns.some((t) => t.tool === suggested)) openDraft(suggested, 'suggested');
+  }
+
+  /* Simulated call: the agent AI asked for a human-only tool and waits until the human runs it or skips it. */
+  let toolWait = null;   // { tool, resolve }
+  function finishToolWait(toolId, ran) {
+    if (!toolWait || (toolId && toolWait.tool !== toolId)) return;
+    const w = toolWait;
+    toolWait = null;
+    Store.set({ agentRequest: null });
+    w.resolve(ran);
+  }
+
+  function requestAgentTool(tool, inputs) {
+    finishToolWait(null, false);
+    const values = {};
+    (inputs || []).forEach((f) => { if (f && f.name && String(f.value || '').trim()) values[f.name] = String(f.value); });
+    Store.set({ agentRequest: { tool: tool.id, inputs: values }, tab: 'guidance' });
+    const running = Store.get().feed.some((r) => r.type === 'manual' && r.tool === tool.id && r.status === 'running');
+    if (!running) openDraft(tool.id, 'agent', values);
+    return new Promise((resolve) => { toolWait = { tool: tool.id, resolve }; });
+  }
+
+  function removeRow(r) {
+    Store.set((st) => ({ feed: st.feed.filter((x) => x.id !== r.id) }));
+    if (r.type === 'manual') finishToolWait(r.tool, false);
+  }
+
+  async function runManualRow(rowId) {
+    const row = feedRow(rowId);
+    const tool = row && toolById(row.tool);
+    if (!tool || row.status !== 'draft') return;
+    updateRow(rowId, { status: 'running' });
+    Store.set((s) => ({ suggestedTool: s.suggestedTool === tool.id ? null : s.suggestedTool }));
+    const { output, ms } = await simulate(tool, row.inputs);
+    updateRow(rowId, { status: 'done', output, ms });
+    Store.set((st) => ({ feed: st.feed.filter((x) => !(x.type === 'manual' && x.tool === tool.id && x.status === 'draft' && !x.touched && x.id !== rowId)) }));
+    finishToolWait(tool.id, true);
+  }
+
+  /* Resolves when a task is done, including any steps waiting for the agent's click. */
+  const taskWaiters = new Map();
+  function finishTask(taskId, patch) {
+    updateRow(taskId, Object.assign({ status: 'done' }, patch));
+    const resolve = taskWaiters.get(taskId);
+    taskWaiters.delete(taskId);
+    if (resolve) resolve();
+  }
+  function releaseWaits() {
+    finishToolWait(null, false);
+    taskWaiters.forEach((resolve) => resolve());
+    taskWaiters.clear();
+  }
+
+  /* Runs the next steps of an AI task until it finishes, hits its step limit, or needs the agent:
+     a missing input, or (with "All manual" tools) the agent's click to run the step. */
+  async function continueTask(taskId, forceFinish) {
+    for (;;) {
+      const task = feedRow(taskId);
+      if (!task || task.status !== 'running' || Store.get().callStatus === 'idle') return;
+      const doneSteps = task.steps.filter((st) => st.status === 'done' || st.status === 'skipped').length;
+      const mustFinish = forceFinish || doneSteps >= MAX_TASK_STEPS;
+      const s = Store.get();
+      let step;
+      try { step = await AI.nextStep(s, userById(s.userId), task, mustFinish); }
+      catch (e) { finishTask(taskId, { summary: { title: 'Could not finish this task', rows: [], note: e.message || String(e) } }); return; }
+      if (step.action === 'finish' || mustFinish) {
+        finishTask(taskId, { summary: step.summary });
+        addFinding(step.summary);
+        return;
+      }
+      const tool = toolById(String(step.tool || '').trim());
+      if (!tool || !tool.autoApproved) {
+        if (tool) Store.set({ suggestedTool: tool.id });
+        forceFinish = true;
+        continue;
+      }
+      const values = {};
+      (step.inputs || []).forEach((f) => { if (f && f.name) values[f.name] = String(f.value || ''); });
+      const inputs = prefilledInputs(tool, values);
+      /* Repeating a call this task already made returns the same answer: wrap up instead. */
+      if (task.steps.some((st) => st.status === 'done' && st.tool === tool.id && JSON.stringify(st.inputs) === JSON.stringify(inputs))) {
+        forceFinish = true;
+        continue;
+      }
+      const missing = s.mode === 'simulated' ? [] : missingInputs(tool, inputs);
+      const pause = missing.length || s.settings.toolMode === 'manual';
+      const stepId = nextId();
+      updateRow(taskId, (r) => ({ steps: r.steps.concat([{ id: stepId, tool: tool.id, inputs, missing, status: pause ? 'needs_input' : 'running' }]) }));
+      if (pause) { updateRow(taskId, { status: 'needs_input' }); return; }
+      const { output, ms } = await simulate(tool, inputs);
+      updateStep(taskId, stepId, { status: 'done', output, ms });
+    }
+  }
+
+  function startTask(goal) {
+    const id = nextId();
+    const done = new Promise((resolve) => taskWaiters.set(id, resolve));
+    Store.set((s) => ({ feed: s.feed.concat([{ id, type: 'task', goal, status: 'running', steps: [], started: Date.now() }]), tab: 'guidance' }));
+    continueTask(id);
+    return done;
+  }
+
+  /* The agent skipped a step a paused task was waiting on; the task wraps up with what it has. */
+  async function skipStep(taskId, stepId) {
+    const task = feedRow(taskId);
+    if (!task || task.status !== 'needs_input') return;
+    updateStep(taskId, stepId, { status: 'skipped', missing: [] });
+    updateRow(taskId, { status: 'running' });
+    await continueTask(taskId, true);
+    if (Store.get().mode !== 'simulated') settle();
+  }
+
+  /* The agent ran (and if needed filled in) the step a paused task was waiting on. */
+  async function resumeTask(taskId, stepId, inputs) {
+    const task = feedRow(taskId);
+    const step = task && task.steps.find((st) => st.id === stepId);
+    const tool = step && toolById(step.tool);
+    if (!tool || task.status !== 'needs_input') return;
+    if (missingInputs(tool, inputs).length) { notify('Fill in the required inputs first.'); return; }
+    updateStep(taskId, stepId, { inputs, missing: [], status: 'running' });
+    updateRow(taskId, { status: 'running' });
+    const { output, ms } = await simulate(tool, inputs);
+    updateStep(taskId, stepId, { status: 'done', output, ms });
+    await continueTask(taskId);
+    if (Store.get().mode === 'simulated') return;
+    settle();
   }
 
   /* Workflows are matched by name and steps by position, so a status change can pulse. */
@@ -148,8 +323,13 @@
     return groups;
   }
 
-  function applyAnalysis(res) {
-    if (!res || typeof res !== 'object') throw new Error('Empty analysis');
+  function applyWorkflow(res) {
+    if (!res || typeof res !== 'object') throw new Error('Empty workflow update');
+    Store.set((s) => ({ groups: mergeWorkflows(s.groups, res.workflows || []) }));
+  }
+
+  function applyGuidance(res) {
+    if (!res || typeof res !== 'object') throw new Error('Empty guidance update');
     const tools = (res.tools || []).filter((t) => t && toolById(t.name));
     const prefill = {};
     tools.forEach((t) => {
@@ -157,56 +337,94 @@
       (t.inputs || []).forEach((f) => { if (f && f.name && typeof f.value === 'string') values[f.name] = f.value; });
       prefill[t.name] = values;
     });
-    const suggested = typeof res.suggestedTool === 'string' && toolById(res.suggestedTool.trim()) ? res.suggestedTool.trim() : null;
+    /* Only a human-only tool can be suggested; auto-approved tools must go through a task. */
+    const suggestedDef = typeof res.suggestedTool === 'string' && toolById(res.suggestedTool.trim());
+    const suggested = suggestedDef && !suggestedDef.autoApproved ? suggestedDef.id : null;
+    const task = typeof res.autoTask === 'string' ? res.autoTask.trim() : '';
     Store.set((s) => ({
-      groups: mergeWorkflows(s.groups, res.workflows || []),
+      pendingTask: task,
       tags: Array.isArray(res.tags) ? res.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 8) : s.tags,
-      tools: tools.length ? tools.map((t) => t.name) : s.tools,
       toolPrefill: Object.assign({}, s.toolPrefill, prefill),
       suggestedTool: suggested
     }));
-    const cards = (res.guidance || []).filter((c) => c && c.text && AI.GUIDANCE_KINDS.includes(c.kind) && c.kind !== 'say').slice(0, 2);
+    if (Store.get().callStatus === 'active') syncSuggestedDrafts(suggested);
+    /* One card at a time; whether a new card is worth replacing the current one is up to the guidance prompt. */
+    const cards = (res.guidance || []).filter((c) => c && c.text && c.kind).slice(0, 1)
+      .filter((c) => !holdTasks || /^caution$/i.test(String(c.kind).trim()));
     pushCards(cards);
   }
 
-  /* Scripted playback stands in for the agent: run the tool the phone assist suggested, with its prefilled inputs. */
-  async function autoRunSuggestedTools() {
-    const ran = new Set();
-    for (let n = 0; n < MAX_AUTO_TOOLS_PER_TURN; n++) {
-      const s = Store.get();
-      const id = s.suggestedTool;
-      if (s.mode !== 'scripted' || s.callStatus !== 'active' || !id || ran.has(id)) return;
-      ran.add(id);
-      const tool = toolById(id);
-      const prefill = s.toolPrefill[id] || {};
-      const inputs = {};
-      tool.inputs.forEach((f) => { inputs[f.key] = prefill[f.key] || ''; });
-      await runTool(id, inputs);
+  /* One queue per prompt: a request made while one is in flight reruns it once with the latest state. */
+  let busyQueues = 0;
+  function makeQueue(call, apply) {
+    let inFlight = null;
+    let pending = false;
+    return () => {
+      if (inFlight) { pending = true; return inFlight; }
+      inFlight = (async () => {
+        busyQueues++;
+        Store.set({ aiBusy: true, aiError: '' });
+        do {
+          pending = false;
+          try {
+            const s = Store.get();
+            apply(await call(s, userById(s.userId)));
+          } catch (e) {
+            Store.set({ aiError: e.message || String(e) });
+          }
+        } while (pending);
+        busyQueues--;
+        if (!busyQueues) Store.set({ aiBusy: false });
+        inFlight = null;
+      })();
+      return inFlight;
+    };
+  }
+  const workflowQueue = makeQueue((s, u) => AI.workflow(s, u), applyWorkflow);
+  const guidanceQueue = makeQueue((s, u) => AI.guidance(s, u), applyGuidance);
+
+  /* The workflow and guidance prompts run at the same time; each updates its own panel when it answers. */
+  function scheduleAnalysis() {
+    if (!AI.available()) return Promise.resolve();
+    return Promise.all([workflowQueue(), guidanceQueue()]);
+  }
+
+  /* After a line or a tool result: update the screen, then let the phone assist run the task it asked for. */
+  let turnTasks = 0;
+  function newTurn() { turnTasks = 0; }
+  /* Simulated call: the agent just handed the turn to the caller, so lookups and new cards
+     (other than a Caution) wait for the update after the caller's reply. */
+  let holdTasks = false;
+
+  async function settleOnce() {
+    for (let n = 0; n < MAX_TASKS_PER_TURN + 1; n++) {
       await scheduleAnalysis();
+      const s = Store.get();
+      if (s.callStatus !== 'active') return;
+      const taskRunning = s.feed.some((r) => r.type === 'task' && r.status === 'running');
+      if (s.pendingTask && !taskRunning && turnTasks < MAX_TASKS_PER_TURN && !holdTasks) {
+        turnTasks++;
+        const goal = s.pendingTask;
+        Store.set({ pendingTask: '' });
+        if (s.mode === 'simulated') { await startTask(goal); continue; }
+        startTask(goal).then(() => settle());   // live: guidance keeps updating while the task runs
+        return;
+      }
+      return;
     }
   }
 
-  let inFlight = null;
-  let pending = false;
-  function scheduleAnalysis() {
+  let settling = null;
+  let settleAgain = false;
+  function settle() {
     if (!AI.available()) return Promise.resolve();
-    if (inFlight) { pending = true; return inFlight; }
-    inFlight = (async () => {
-      do {
-        pending = false;
-        Store.set({ aiBusy: true, aiError: '' });
-        try {
-          const s = Store.get();
-          const res = await AI.analyze(s, userById(s.userId));
-          applyAnalysis(res);
-        } catch (e) {
-          Store.set({ aiError: e.message || String(e) });
-        }
-      } while (pending);
-      Store.set({ aiBusy: false });
-      inFlight = null;
+    if (settling) { settleAgain = true; return settling; }
+    settling = (async () => {
+      do { settleAgain = false; await settleOnce(); } while (settleAgain);
+      if (Store.get().callStatus !== 'idle') pushCards([]);   // a conclusion no card followed still shows on its own
+      settling = null;
     })();
-    return inFlight;
+    return settling;
   }
 
   /* ------------------------------------------------------------------ */
@@ -221,22 +439,26 @@
     const autoFirst = opts.autoFirst !== false;
     stopVoice();
     TTS.cancel();
+    releaseWaits();
     const s = Store.get();
     let scenarioId = null;
     let userId;
-    const chosen = opts.userId || (s.incoming !== 'random' ? s.incoming : null);
-    if (s.mode === 'scripted') {
-      const sc = (opts.scenarioId && scenarioById(opts.scenarioId)) || (chosen && D.SCENARIOS.find((x) => x.userId === chosen)) || pickRandom(D.SCENARIOS, lastScenarioId);
+    if (s.mode === 'simulated') {
+      if (!AI.available()) { notify('A simulated call needs an AI model: both the caller and the agent are played by it.'); return false; }
+      if (!AI.scenarios.length) { notify('No scenarios found in scenarios/.'); return false; }
+      const pick = opts.scenarioId || (s.scenarioPick !== 'random' ? s.scenarioPick : null);
+      const sc = (pick && scenarioById(pick)) || pickRandom(AI.scenarios, lastScenarioId);
       scenarioId = sc.id;
-      userId = sc.userId;
+      userId = userById(sc.customer).id;
       lastScenarioId = sc.id;
     } else {
+      const chosen = opts.userId || (s.incoming !== 'random' ? s.incoming : null);
       userId = (chosen && userById(chosen).id === chosen) ? chosen : pickRandom(D.USERS, lastUserId).id;
       lastUserId = userId;
     }
     Store.set(Object.assign(freshCall(), { userId, scenarioId, callStatus: 'active', callStart: Date.now(), tab: 'customer', aiStatus: AI.status() }));
-    if (s.mode === 'scripted') {
-      if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().scriptIndex === 0) playTurn(0, { interrupt: false }); }, 300);
+    if (s.mode === 'simulated') {
+      if (autoFirst) setTimeout(() => { if (Store.get().callStatus === 'active' && Store.get().turnCount === 0) playNext(); }, 0);
     } else {
       if (!AI.available()) notify('OpenAI is not connected on this server, so the panels will not update in live mode.');
     }
@@ -246,11 +468,13 @@
     stopVoice();
     TTS.cancel();
     Store.set({ callStatus: 'ended', autoplay: false, listening: null, interim: '', speaking: null });
+    releaseWaits();
   }
 
   function resetAll() {
     stopVoice();
     TTS.cancel();
+    releaseWaits();
     Store.set(Object.assign(freshCall(), { tab: 'guidance', notice: '' }));
   }
 
@@ -261,53 +485,94 @@
     finally { if (Store.get().speaking === speaker) Store.set({ speaking: null }); }
   }
 
-  async function playTurn(i, opts) {
-    const interrupt = !!(opts && opts.interrupt);
-    const sc = currentScenario();
-    if (!sc) return false;
-    const turns = sc.turns;
-    if (currentPlay) {
-      if (interrupt) TTS.cancel();
-      await currentPlay;
-    }
+  /* The caller's next line is drafted in the background while the screen updates after the agent spoke. */
+  let callerDraft = null;   // { callStart, turn, promise }
+
+  /* One simulated turn, strictly in order with no added waits: the line is generated and spoken,
+     a human-only tool the agent asked for waits for the human to run or skip it, then the screen
+     updates before the other side speaks. After a mid-action agent line, new results or a new card
+     keep the floor with the agent once; after a hand-over line only a Caution does. */
+  async function simTurn() {
     const s = Store.get();
-    if (s.callStatus !== 'active' || s.scriptIndex !== i || !turns[i]) return false;
-    const turn = turns[i];
-    const p = (async () => {
-      addLine(turn.speaker, turn.text);
-      Store.set({ scriptIndex: i + 1 });
-      const speech = speakLine(turn.speaker, turn.text);
-      if (AI.available()) {
-        await scheduleAnalysis();
-        await autoRunSuggestedTools();
+    const sc = currentScenario();
+    if (s.callStatus !== 'active' || !sc) return { played: false };
+    const callStart = s.callStart;
+    const live = () => Store.get().callStatus === 'active' && Store.get().callStart === callStart;
+    const speaker = s.nextSpeaker;
+    let res;
+    try {
+      if (speaker === 'agent') {
+        res = await AI.agentTurn(s, userById(s.userId), sc);
+      } else {
+        const draft = callerDraft && callerDraft.callStart === callStart && callerDraft.turn === s.turnCount ? callerDraft.promise : null;
+        callerDraft = null;
+        res = (draft && await draft) || await AI.callerTurn(s, sc);
       }
-      const spoke = await speech;
-      if (i + 1 >= turns.length) Store.set({ callStatus: 'ended', autoplay: false });
-      return { played: true, spoke: !!spoke };
-    })();
+    } catch (e) {
+      Store.set({ aiError: e.message || String(e), autoplay: false });
+      return { played: false, error: true };
+    }
+    if (!live()) return { played: false };
+    const say = String((res && res.say) || '').trim();
+    if (say) {
+      const line = addLine(speaker, say);
+      if (speaker === 'agent') line.handOver = !!res.hand_over;
+    }
+    const callerDone = s.callerDone || (speaker === 'caller' && !!res.end_call);
+    /* The call ends on the agent's closing line after the caller has said goodbye. */
+    const ending = (speaker === 'agent' && s.callerDone) || s.turnCount + 1 >= MAX_SIM_TURNS;
+    const followUp = speaker === 'agent' && s.agentFollowUp;
+    Store.set({ turnCount: s.turnCount + 1, nextSpeaker: speaker === 'agent' ? 'caller' : 'agent', callerDone, agentFollowUp: false });
+    if (say) await speakLine(speaker, say);
+    if (!live()) return { played: true };
+    const asked = speaker === 'agent' && res.tool ? toolById(String(res.tool).trim()) : null;
+    /* The human may already have run it from the copilot's suggestion while the agent was speaking;
+       one still running is waited on by requestAgentTool. */
+    const alreadyRan = asked && Store.get().toolRuns.slice(s.toolRuns.length).some((t) => t.tool === asked.id);
+    if (asked && !asked.autoApproved && !alreadyRan) {
+      const ran = await requestAgentTool(asked, res.inputs);
+      if (!live()) return { played: true };
+      if (!ran) addLine('tool', `${asked.label} → not run (skipped by the human agent)`);
+    }
+    if (!live()) return { played: true };
+    if (ending) { Store.set({ callStatus: 'ended', autoplay: false }); return { played: true, ended: true }; }
+    if (!say && !(speaker === 'agent' && res.tool)) return { played: true };
+    if (speaker === 'agent' && say) {
+      const after = Store.get();
+      callerDraft = { callStart, turn: after.turnCount, promise: AI.callerTurn(after, sc).catch(() => null) };
+    }
+    const batchBefore = Store.get().batch;
+    const handOver = speaker === 'agent' && !!say && !!res.hand_over;
+    newTurn();
+    holdTasks = handOver;
+    try { await settle(); } finally { holdTasks = false; }
+    if (!live()) return { played: true };
+    if (speaker === 'agent' && say && !followUp) {
+      const after = Store.get();
+      const card = after.guidance[after.guidance.length - 1];
+      const newCaution = after.batch !== batchBefore && card && /^caution$/i.test(String(card.kind).trim());
+      const newCard = after.batch !== batchBefore;
+      if (handOver ? newCaution : (after.toolRuns.length > s.toolRuns.length || newCard)) {
+        callerDraft = null;
+        Store.set({ nextSpeaker: 'agent', agentFollowUp: true });
+      }
+    }
+    return { played: true };
+  }
+
+  async function playNext() {
+    if (Store.get().callStatus !== 'active') return false;
+    if (currentPlay) return currentPlay;
+    const p = simTurn();
     currentPlay = p;
     try { return await p; } finally { if (currentPlay === p) currentPlay = null; }
   }
 
-  function playNext() {
-    const s = Store.get();
-    if (s.callStatus !== 'active') return Promise.resolve(false);
-    return playTurn(s.scriptIndex, { interrupt: true });
-  }
-
   async function autoplayLoop() {
+    if (currentPlay) await currentPlay;
     while (Store.get().autoplay && Store.get().callStatus === 'active') {
-      const sc = currentScenario();
-      if (!sc) break;
-      const i = Store.get().scriptIndex;
-      if (i >= sc.turns.length) break;
-      const res = await playTurn(i, { interrupt: false });
-      if (!Store.get().autoplay) break;
-      if (res && res.played) {
-        await sleep(res.spoke ? 450 : Math.min(5200, 1100 + sc.turns[i].text.length * 36));
-      } else {
-        await sleep(200);
-      }
+      const res = await playNext();
+      if (!res || !res.played) break;
     }
     Store.set({ autoplay: false });
   }
@@ -315,7 +580,7 @@
   function toggleAutoplay() {
     const s = Store.get();
     if (s.autoplay) { Store.set({ autoplay: false }); return; }
-    if (s.callStatus !== 'active') startCall({ autoFirst: false });
+    if (s.callStatus !== 'active' && startCall({ autoFirst: false }) === false) return;
     Store.set({ autoplay: true });
     autoplayLoop();
   }
@@ -325,6 +590,7 @@
     TTS.cancel();
     const s = Store.get();
     if (s.mode === mode) return;
+    releaseWaits();
     Store.set(Object.assign(freshCall(), { mode }));
   }
 
@@ -346,18 +612,16 @@
   function addLiveLine(speaker, text) {
     if (Store.get().callStatus !== 'active') return;
     addLine(speaker, text);
-    scheduleAnalysis();
+    newTurn();
+    settle();
   }
 
   function speakAs(speaker) {
     const s = Store.get();
     if (s.callStatus !== 'active') { notify('Start the call first.'); return; }
-    if (s.mode === 'scripted') {
+    if (s.mode === 'simulated') {
       if (s.autoplay) return;
-      const sc = currentScenario();
-      const next = sc ? sc.turns[s.scriptIndex] : null;
-      if (!next) return;
-      if (next.speaker !== speaker) { notify(`The next scripted line belongs to the ${next.speaker === 'caller' ? 'caller' : 'support agent'}.`); return; }
+      if (s.nextSpeaker !== speaker) { notify(`The next turn belongs to the ${s.nextSpeaker === 'caller' ? 'caller' : 'support agent'}.`); return; }
       playNext();
       return;
     }
@@ -412,7 +676,8 @@
   /* ------------------------------------------------------------------ */
   /* Components                                                           */
   /* ------------------------------------------------------------------ */
-  const KIND_LABEL = { say: 'Say', ask: 'Ask', tell: 'Tell', info: 'Info', do: 'Do', recommendation: 'Recommendation', caution: 'Caution', answer: 'Answer' };
+  /* Display names for kinds that are not already in their display form; any other kind shows as written. */
+  const KIND_LABEL = { answer: 'Answer' };
 
   function useAutoScroll(ref, key) {
     const seen = useRef(false);
@@ -444,18 +709,19 @@
 
   function Rail({ s }) {
     const [draft, setDraft] = useState('');
-    const scripted = s.mode === 'scripted';
+    const simulated = s.mode === 'simulated';
     const active = s.callStatus === 'active';
-    const sc = scripted ? scenarioById(s.scenarioId) : null;
-    const next = sc ? sc.turns[s.scriptIndex] : null;
-    const total = sc ? sc.turns.length : 0;
+    const sc = simulated ? scenarioById(s.scenarioId) : null;
     const user = userById(s.userId);
     const speakClass = (who) => {
       let c = 'rail-btn';
-      if (scripted && active && !s.autoplay && next && next.speaker === who) c += ' next';
-      if (!scripted && s.listening === who) c += ' listening';
+      if (simulated && active && !s.autoplay && s.nextSpeaker === who) c += ' next';
+      if (!simulated && s.listening === who) c += ' listening';
       return c;
     };
+    const pausedStep = s.feed.filter((r) => r.type === 'task' && r.status === 'needs_input').map((r) => r.steps.find((st) => st.status === 'needs_input')).find(Boolean);
+    const waitingTool = (s.agentRequest && toolById(s.agentRequest.tool)) || (pausedStep && toolById(pausedStep.tool));
+    const waitingOn = waitingTool ? waitingTool.label : '';
     const send = (who) => { const t = draft.trim(); if (!t) return; if (!active) { notify('Start the call first.'); return; } addLiveLine(who, t); setDraft(''); };
     return html`
       <aside class="rail">
@@ -464,28 +730,36 @@
           <button class="icon-btn" title="Settings" aria-label="Settings" onClick=${() => Store.set({ settingsOpen: true })}>⚙</button>
         </div>
         <div class="seg">
-          <button class=${scripted ? 'on' : ''} onClick=${() => setMode('scripted')}>Scripted</button>
-          <button class=${!scripted ? 'on' : ''} onClick=${() => setMode('live')}>Live voice</button>
+          <button class=${simulated ? 'on' : ''} onClick=${() => setMode('simulated')}>Simulated</button>
+          <button class=${!simulated ? 'on' : ''} onClick=${() => setMode('live')}>Live voice</button>
+        </div>
+        <div class="rail-field">
+          <span class="rail-field-label">Tools</span>
+          <div class="seg" title="Auto + manual: lookups the tools file allows run on their own. All manual: every tool waits for you to run it.">
+            <button class=${s.settings.toolMode !== 'manual' ? 'on' : ''} onClick=${() => updateSettings({ toolMode: 'auto' })}>Auto + manual</button>
+            <button class=${s.settings.toolMode === 'manual' ? 'on' : ''} onClick=${() => updateSettings({ toolMode: 'manual' })}>All manual</button>
+          </div>
         </div>
         <button class=${'rail-btn ' + (s.callStatus === 'idle' ? 'primary' : '')} onClick=${() => startCall()}>${s.callStatus === 'idle' ? 'Start call' : 'New call'}</button>
-        <button class=${speakClass('caller')} disabled=${!active || (scripted && s.autoplay)} onClick=${() => speakAs('caller')}>
-          ${!scripted && s.listening === 'caller' ? html`<i class="dot"></i>` : ''}Speak as Caller
+        <button class=${speakClass('caller')} disabled=${!active || (simulated && s.autoplay)} onClick=${() => speakAs('caller')}>
+          ${!simulated && s.listening === 'caller' ? html`<i class="dot"></i>` : ''}Speak as Caller
         </button>
-        <button class=${speakClass('agent')} disabled=${!active || (scripted && s.autoplay)} onClick=${() => speakAs('agent')}>
-          ${!scripted && s.listening === 'agent' ? html`<i class="dot"></i>` : ''}Speak as Support Agent
+        <button class=${speakClass('agent')} disabled=${!active || (simulated && s.autoplay)} onClick=${() => speakAs('agent')}>
+          ${!simulated && s.listening === 'agent' ? html`<i class="dot"></i>` : ''}Speak as Support Agent
         </button>
 
-        ${scripted ? html`
+        ${simulated ? html`
           <div class="rail-row">
             <button class="rail-small" onClick=${toggleAutoplay}>${s.autoplay ? '❚❚ Pause' : '▶ Play all'}</button>
-            <button class="rail-small" disabled=${!active || s.autoplay} onClick=${playNext}>Next ▸</button>
+            <button class="rail-small" disabled=${!active || s.autoplay} onClick=${() => playNext()}>Next ▸</button>
           </div>
           <div class="rail-row">
-            <button class=${'rail-small ' + (s.settings.audio ? '' : 'off')} title=${TTS.supported ? 'Read the scripted lines aloud' : 'Speech synthesis is not available in this browser'} onClick=${() => updateSettings({ audio: !s.settings.audio })}>${s.settings.audio ? '🔊 Audio on' : '🔇 Audio off'}</button>
-            <span class="rail-note center">${sc ? `Turn ${Math.min(s.scriptIndex, total)} of ${total}` : 'Random scenario'}</span>
+            <button class=${'rail-small ' + (s.settings.audio ? '' : 'off')} title=${TTS.supported ? 'Read the lines aloud' : 'Speech synthesis is not available in this browser'} onClick=${() => updateSettings({ audio: !s.settings.audio })}>${s.settings.audio ? '🔊 Audio on' : '🔇 Audio off'}</button>
+            <span class="rail-note center">${sc && s.callStatus !== 'idle' ? `Turn ${s.turnCount}` : ''}</span>
           </div>
-          <div class="rail-note">${sc ? html`<b>${user.phone}</b> · ${sc.title}` : 'Pick an incoming number below, or leave it random.'}</div>
+          <div class="rail-note">${sc && s.callStatus !== 'idle' ? html`<b>${user.phone}</b> · ${sc.title}` : 'An AI plays the caller and another plays the agent. Pick a scenario below, or leave it random.'}</div>
           ${s.settings.audio && !TTS.supported ? html`<div class="rail-warn">No speech synthesis here; lines play silently.</div>` : ''}
+          ${waitingOn ? html`<div class="rail-warn">Waiting for you to run ${waitingOn}.</div>` : ''}
         ` : html`
           <div class="rail-note">
             ${recognizer.supported
@@ -502,13 +776,21 @@
           <div class="rail-hint">Enter sends as caller, Alt+Enter as agent.</div>
         `}
 
-        <label class="rail-select" title="Which phone number the simulated call comes from">
-          <span>Incoming number</span>
-          <select value=${s.incoming} disabled=${active} onChange=${(e) => Store.set({ incoming: e.target.value })}>
-            <option value="random">Random</option>
-            ${D.USERS.map((u) => html`<option key=${u.id} value=${u.id}>${u.phone}</option>`)}
-          </select>
-        </label>
+        ${simulated ? html`
+          <label class="rail-select" title="Which scenario the simulated call plays">
+            <span>Scenario</span>
+            <select value=${s.scenarioPick} disabled=${active} onChange=${(e) => Store.set({ scenarioPick: e.target.value })}>
+              <option value="random">Random</option>
+              ${AI.scenarios.map((x, i) => html`<option key=${x.id} value=${x.id}>${i + 1}. ${x.title}</option>`)}
+            </select>
+          </label>` : html`
+          <label class="rail-select" title="Which phone number the call comes from">
+            <span>Incoming number</span>
+            <select value=${s.incoming} disabled=${active} onChange=${(e) => Store.set({ incoming: e.target.value })}>
+              <option value="random">Random</option>
+              ${D.USERS.map((u) => html`<option key=${u.id} value=${u.id}>${u.phone}</option>`)}
+            </select>
+          </label>`}
         <div class="rail-row">
           <button class="rail-btn ghost" disabled=${!active} onClick=${endCall}>End call</button>
           <button class="rail-btn ghost" disabled=${s.callStatus === 'idle' && !s.transcript.length} onClick=${resetAll}>Reset</button>
@@ -543,29 +825,19 @@
       </div>`;
   }
 
-  function ToolStrip({ s }) {
-    const ids = (s.suggestedTool && !s.tools.includes(s.suggestedTool) ? [s.suggestedTool].concat(s.tools) : s.tools).filter((id) => toolById(id));
-    return html`
-      <div class="tools">
-        <div class="tools-label">Contextual tools${s.suggestedTool ? html`<span class="tools-hint"> · ${toolById(s.suggestedTool).label} is needed now</span>` : ''}</div>
-        <div class="chips">
-          ${ids.map((id) => { const t = toolById(id); const flash = s.suggestedTool === id && s.selectedTool !== id; return html`
-            <button key=${id} class=${'chip ' + (s.selectedTool === id ? 'on ' : '') + (flash ? 'flash' : '')} title=${flash ? 'Suggested now: ' + t.description : t.description} onClick=${() => selectTool(id)}>${t.label}</button>`; })}
-        </div>
-      </div>`;
-  }
-
   function Tabs({ s }) {
     const tab = (id, label, badge) => html`<button class=${'tab ' + (s.tab === id ? 'on' : '')} onClick=${() => Store.set({ tab: id, unseenGuidance: id === 'guidance' ? 0 : s.unseenGuidance })}>${label}${badge ? html`<span class="tab-badge">${badge}</span>` : ''}</button>`;
     return html`<div class="tabs">${tab('guidance', 'Live Guidance', s.tab !== 'guidance' && s.unseenGuidance ? s.unseenGuidance : 0)}${tab('customer', 'Customer 360')}${tab('transcript', 'Transcript')}
-      ${s.tab === 'guidance' && s.guidance.length ? html`<button class="link tabs-action" onClick=${() => Store.set({ guidance: [] })}>Clear guidance</button>` : ''}</div>`;
+      ${s.tab === 'guidance' && (s.guidance.length || s.findings.length) ? html`<button class="link tabs-action" onClick=${() => Store.set({ guidance: [], findings: [] })}>Clear guidance</button>` : ''}</div>`;
   }
 
   function GuidanceCard({ c }) {
+    const kind = String(c.kind).trim();
+    const cls = kind.toLowerCase().replace(/[^a-z]+/g, '-');
     return html`
-      <div class=${'gcard kind-' + c.kind}>
+      <div class=${'gcard kind-' + cls}>
         <div class="gline">
-          <span class=${'kw kw-' + c.kind}>${KIND_LABEL[c.kind] || c.kind}:</span>
+          <span class=${'kw kw-' + cls}>${KIND_LABEL[cls] || kind}:</span>
           <span class="gtext">${c.text}</span>
         </div>
         ${c.bullets && c.bullets.length ? html`<ul class="gbullets">${c.bullets.map((b, i) => html`<li key=${i}>${b}</li>`)}</ul>` : ''}
@@ -573,17 +845,28 @@
       </div>`;
   }
 
+  function Finding({ f }) {
+    return html`
+      <div class="gfind">
+        <div class="gline">
+          <span class="kw kw-find">AI conclusion:</span>
+          <span class="gtext">${f.title}</span>
+        </div>
+        ${f.rows.length ? html`<div class="gfrows">${f.rows.map((r, i) => html`<span key=${i}><b>${r.label}:</b> ${r.value}</span>`)}</div>` : ''}
+      </div>`;
+  }
+
   function GuidanceTab({ s }) {
     const boxRef = useRef(null);
     const lastRef = useRef(null);
     const spacerRef = useRef(null);
-    const batches = [];
-    s.guidance.forEach((c) => {
-      const last = batches[batches.length - 1];
-      if (last && last.batch === c.batch) last.cards.push(c);
-      else batches.push({ batch: c.batch, cards: [c] });
-    });
+    const byBatch = new Map();
+    const group = (b) => { if (!byBatch.has(b)) byBatch.set(b, { batch: b, findings: [], cards: [] }); return byBatch.get(b); };
+    s.findings.forEach((f) => group(f.batch).findings.push(f));
+    s.guidance.forEach((c) => group(c.batch).cards.push(c));
+    const batches = [...byBatch.values()].sort((a, b) => a.batch - b.batch);
     const latest = batches.length ? batches[batches.length - 1].batch : 0;
+    const lookups = s.feed.filter((r) => r.type === 'task' && r.status === 'running');
     /* Keep only the newest guidance in view: older batches sit above, reachable by scrolling up. */
     useEffect(() => {
       const box = boxRef.current; const last = lastRef.current; const spacer = spacerRef.current;
@@ -595,7 +878,7 @@
       if (spacer) spacer.style.height = `${Math.max(0, room)}px`;
       const top = last.offsetTop - lead;
       try { box.scrollTo({ top, behavior: batches.length > 1 ? 'smooth' : 'auto' }); } catch (e) { box.scrollTop = top; }
-    }, [latest, s.guidance.length, s.aiBusy, s.aiError]);
+    }, [latest, s.guidance.length, s.findings.length, s.aiBusy, s.aiError, lookups.length]);
     return html`
       <div class="guidance">
         <div class="tags">
@@ -606,55 +889,141 @@
           ${batches.length
             ? batches.map((b, i) => html`
               <div key=${b.batch} class=${'gbatch ' + (b.batch === latest ? 'latest' : 'earlier')} ref=${i === batches.length - 1 ? lastRef : null}>
+                ${b.findings.map((f) => html`<${Finding} key=${f.id} f=${f} />`)}
                 ${b.cards.map((c) => html`<${GuidanceCard} key=${c.id} c=${c} />`)}
               </div>`)
             : html`<div class="gempty">${s.callStatus === 'idle' ? 'Start a call. Only things worth your attention show up here: policy risks, facts the caller needs, offers worth making.' : 'Nothing needs your attention yet.'}</div>`}
-          ${s.aiBusy ? html`<div class="gbusy">GPT-5.6 Luna is updating the screen…</div>` : ''}
+          ${s.aiBusy && !lookups.length ? html`<div class="gbusy">GPT-5.6 Luna is updating the screen…</div>` : ''}
           ${s.aiError ? html`<div class="gerror">${s.aiError}</div>` : ''}
           <div class="gspacer" ref=${spacerRef}></div>
         </div>
-        <${ToolIO} s=${s} />
+        <${ActionFeed} s=${s} />
       </div>`;
   }
 
-  function ToolIO({ s }) {
-    if (!s.selectedTool) {
-      return html`<div class="toolio-hint">Click a tool on the left to run it from this screen. Inputs the assistant found in the call or the customer record are pre-filled; blank ones are yours to fill.</div>`;
-    }
-    const tool = toolById(s.selectedTool);
-    const set = (k, v) => Store.set((st) => ({ toolInputs: Object.assign({}, st.toolInputs, { [k]: v }) }));
+  const fmtMs = (ms) => (ms == null ? '' : `${(ms / 1000).toFixed(1)}s`);
+
+  function InputTable({ tool, inputs, editable, missing, onChange }) {
     return html`
-      <div class="toolio">
-        <div class="io-col">
-          <div class="io-label">Input: <span class="io-tool">${tool.label}</span></div>
-          <div class="io-scroll">
-            <table class="io-table">
-              ${tool.inputs.map((f) => html`
-                <tr key=${f.key}>
-                  <th>${f.label}</th>
-                  <td>
-                    ${f.type === 'select'
-                      ? html`<select id=${'in-' + f.key} value=${s.toolInputs[f.key] || ''} onChange=${(e) => set(f.key, e.target.value)}>${f.options.map((o) => html`<option key=${o} value=${o}>${o}</option>`)}</select>`
-                      : html`<input id=${'in-' + f.key} type="text" value=${s.toolInputs[f.key] || ''} onInput=${(e) => set(f.key, e.target.value)} />`}
-                  </td>
-                </tr>`)}
-            </table>
-          </div>
-          <div class="io-actions">
-            <button class="btn-dark" disabled=${s.toolBusy || s.callStatus === 'idle'} onClick=${async () => { await runTool(s.selectedTool, Store.get().toolInputs); scheduleAnalysis(); }}>${s.toolBusy ? 'Running…' : 'Execute'}</button>
-            <button class="link" onClick=${() => Store.set({ selectedTool: null, toolResult: null })}>Close</button>
-            ${s.callStatus === 'idle' ? html`<span class="io-note">Start a call to run tools.</span>` : ''}
-          </div>
+      <table class="io-table">
+        ${tool.inputs.map((f) => html`
+          <tr key=${f.key} class=${(missing || []).includes(f.key) ? 'missing' : ''}>
+            <th>${f.label}${f.optional ? html`<span class="io-opt"> (optional)</span>` : ''}</th>
+            <td>${editable
+              ? html`<input type="text" value=${inputs[f.key] || ''} placeholder=${f.optional ? '' : 'Required'} onInput=${(e) => onChange(Object.assign({}, inputs, { [f.key]: e.target.value }))} />`
+              : html`<span class="io-val">${inputs[f.key] || '—'}</span>`}</td>
+          </tr>`)}
+      </table>`;
+  }
+
+  function OutputRows({ output }) {
+    return html`${Object.entries(output).map(([k, v]) => html`
+      <div key=${k} class=${'io-row ' + (k === 'demo_mode' ? 'demo' : '')}><span class="io-k">${k}</span><span class="io-v">${fmtVal(v)}</span></div>`)}`;
+  }
+
+  const emptyRequired = (tool, inputs) => tool.inputs.filter((f) => !f.optional && !String(inputs[f.key] || '').trim()).map((f) => f.key);
+
+  /* A tool waiting for the agent: its inputs in a plain table, a button named after the tool, and Skip. */
+  function Approval({ tool, inputs, running, disabled, skipLabel, onChange, onRun, onSkip }) {
+    const empty = emptyRequired(tool, inputs);
+    return html`
+      <div class="approve">
+        <table class="io-table approve-table">
+          ${tool.inputs.map((f) => html`
+            <tr key=${f.key} class=${empty.includes(f.key) ? 'missing' : ''}>
+              <th>${f.label}${f.optional ? html`<span class="io-opt"> (optional)</span>` : ''}</th>
+              <td><input type="text" value=${inputs[f.key] || ''} placeholder=${f.optional ? '' : 'Required'} disabled=${running} onInput=${(e) => onChange(Object.assign({}, inputs, { [f.key]: e.target.value }))} /></td>
+            </tr>`)}
+        </table>
+        <div class="approve-actions">
+          ${running
+            ? html`<span class="approve-running">${tool.message || tool.label}<span class="dots"><i></i><i></i><i></i></span></span>`
+            : html`
+              <button class="btn-dark" disabled=${disabled} onClick=${onRun}>${tool.label}</button>
+              <button class="btn-plain" onClick=${onSkip}>${skipLabel || 'Skip'}</button>`}
         </div>
-        <div class="io-col">
-          <div class="io-label">Output:</div>
-          <div class="io-out">
-            ${s.toolBusy ? html`<div class="io-wait">${tool.message || `Calling ${tool.label}`}…</div>` : ''}
-            ${!s.toolBusy && s.toolResult ? Object.entries(s.toolResult).map(([k, v]) => html`
-              <div key=${k} class=${'io-row ' + (k === 'demo_mode' ? 'demo' : '')}><span class="io-k">${k}</span><span class="io-v">${fmtVal(v)}</span></div>`) : ''}
-            ${!s.toolBusy && !s.toolResult ? html`<div class="io-wait">Press Execute to call the mock API.</div>` : ''}
-          </div>
+      </div>`;
+  }
+
+  function ManualRow({ r, s }) {
+    const tool = toolById(r.tool);
+    if (!tool) return '';
+    if (r.status === 'done') {
+      return html`<div class="frow task single"><ul class="tsteps"><${TaskStep} st=${r} prefix="You ran" /></ul></div>`;
+    }
+    const waitedOn = !!(s.agentRequest && s.agentRequest.tool === r.tool);
+    const heading = waitedOn ? 'Agent request:' : r.auto === 'suggested' ? 'Suggested:' : 'Run:';
+    return html`
+      <div class="frow task single">
+        <div class="fcell">
+          <div class="io-label">${heading} <span class="io-tool">${tool.description || tool.label}</span></div>
+          <${Approval} tool=${tool} inputs=${r.inputs} running=${r.status === 'running'} disabled=${s.callStatus === 'idle'}
+            skipLabel=${waitedOn || r.auto === 'suggested' ? 'Skip' : 'Remove'}
+            onChange=${(inputs) => updateRow(r.id, { inputs, touched: true })}
+            onRun=${async () => { const awaited = !!(toolWait && toolWait.tool === r.tool); await runManualRow(r.id); if (!awaited) settle(); }}
+            onSkip=${() => removeRow(r)} />
         </div>
+      </div>`;
+  }
+
+  function TaskStep({ task, st, prefix }) {
+    const [open, setOpen] = useState(false);
+    const tool = toolById(st.tool);
+    if (!tool) return '';
+    if (st.status === 'needs_input') {
+      return html`
+        <li class="tstep-approve">
+          <${Approval} tool=${tool} inputs=${st.inputs} running=${false} disabled=${Store.get().callStatus === 'idle'}
+            onChange=${(inputs) => updateStep(task.id, st.id, { inputs })}
+            onRun=${() => resumeTask(task.id, st.id, st.inputs)}
+            onSkip=${() => skipStep(task.id, st.id)} />
+        </li>`;
+    }
+    const text = st.status === 'running' ? `${tool.message || tool.label}…` : `${prefix ? prefix + ' ' : ''}${tool.label}`;
+    return html`
+      <li class=${'tstep ' + st.status}>
+        <span class="tdot"></span>
+        <div class="tbody">
+          <div class="tsline">
+            <span>${text}</span>
+            ${st.status === 'skipped' ? html`<span class="tskip">skipped</span>` : ''}
+            ${st.status === 'done' ? html`<button class="link tshow" onClick=${() => setOpen(!open)}>${open ? 'Hide details ▴' : 'Show details ▾'}</button>` : ''}
+            ${st.ms != null ? html`<span class="dur">◷ ${fmtMs(st.ms)}</span>` : ''}
+          </div>
+          ${open && st.status === 'done' ? html`
+            <div class="tdetail">
+              <div><div class="io-label">Input:</div><div class="io-box"><${InputTable} tool=${tool} inputs=${st.inputs} editable=${false} /></div></div>
+              <div><div class="io-label">Output:</div><div class="io-out">${st.output ? html`<${OutputRows} output=${st.output} />` : ''}</div></div>
+            </div>` : ''}
+        </div>
+      </li>`;
+  }
+
+  /* Raw tool outputs stay behind each action's details; the task's conclusion shows in Live Guidance. */
+  function TaskRow({ r }) {
+    return html`
+      <div class="frow task single">
+        <div class="fcell">
+          <div class="io-label">AI task: <span class="io-tool">${r.goal}</span>${r.status === 'running' ? html`<span class="dots"><i></i><i></i><i></i></span>` : ''}</div>
+          <ul class="tsteps">
+            ${r.steps.map((st) => html`<${TaskStep} key=${st.id} task=${r} st=${st} />`)}
+            ${r.status === 'running' && !r.steps.some((st) => st.status === 'running') ? html`<li class="tstep thinking"><span class="tdot"></span><div class="tbody"><div class="tsline">Working out the next step…</div></div></li>` : ''}
+            ${r.status === 'done' && !r.steps.length ? html`<li class="tstep thinking"><span class="tdot"></span><div class="tbody"><div class="tsline">No tool was called.</div></div></li>` : ''}
+          </ul>
+        </div>
+      </div>`;
+  }
+
+  function ActionFeed({ s }) {
+    const boxRef = useRef(null);
+    const steps = s.feed.reduce((n, r) => n + (r.steps ? r.steps.length : 0), 0);
+    useAutoScroll(boxRef, `${s.feed.length}|${steps}`);
+    if (!s.feed.length) {
+      return html`<div class="toolio-hint">Tool calls appear here. The assistant runs lookups and checks on its own and shows what it found. When a tool needs you, it opens here with its inputs: check them and press Execute. Inputs found in the call or the customer record are pre-filled; blank ones are yours to fill.</div>`;
+    }
+    return html`
+      <div class="feed" ref=${boxRef}>
+        ${s.feed.map((r) => (r.type === 'task' ? html`<${TaskRow} key=${r.id} r=${r} />` : html`<${ManualRow} key=${r.id} r=${r} s=${s} />`))}
       </div>`;
   }
 
@@ -752,10 +1121,10 @@
                 <option value="default">Default (slower, thinks first)</option>
               </select></label>
           ` : html`
-            <p class="modal-help">${AI.server ? 'This server has no OpenAI key yet. Add OPENAI_API_KEY and ELEVENLABS_API_KEY to .env and restart. Scripted playback still works.' : 'No local server is running, so only scripted playback is available. From the project folder, run npm start and open http://localhost:8080.'}</p>
+            <p class="modal-help">${AI.server ? 'This server has no OpenAI key yet. Add OPENAI_API_KEY and ELEVENLABS_API_KEY to .env and restart. Simulated calls need it.' : 'No local server is running, so no AI is available for simulated calls. From the project folder, run npm start and open http://localhost:8080.'}</p>
           `}
-          <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the scripted call aloud</span></label>
-          <p class="modal-help">The panels update automatically after every line. Behavior comes from prompts/system_prompt.md, prompts/phone_assist.md, prompts/phone_assist_best_reply.md, prompts/chat.md, tools.md and kb/. Refresh the page after editing them.</p>
+          <label class="field check"><input type="checkbox" checked=${form.audio} onChange=${f('audio')} /><span>Read the simulated call aloud</span></label>
+          <p class="modal-help">The panels update automatically after every line. Behavior comes from prompts/system_prompt.md, prompts/phone_assist_workflow.md, prompts/phone_assist_guidance.md, prompts/phone_assist_best_reply.md, prompts/chat.md, tools.md and kb/. Refresh the page after editing them.</p>
           <div class="modal-actions">
             <button class="btn-dark" onClick=${save}>Save</button>
             <button class="btn-plain" onClick=${runTest}>Test connection</button>
@@ -778,7 +1147,6 @@
         <main class="card">
           <section class="left">
             <${Workflow} s=${s} />
-            <${ToolStrip} s=${s} />
           </section>
           <section class="right">
             <${Tabs} s=${s} />
@@ -801,10 +1169,10 @@
   AI.onChange((st) => {
     TTS.useServer(AI.hasVoice());
     const idle = Store.get().callStatus === 'idle';
-    Store.set(idle ? { aiStatus: st, tools: defaultTools(), selectedTool: null } : { aiStatus: st });
+    Store.set(idle ? { aiStatus: st, feed: [] } : { aiStatus: st });
   });
   AI.init(Store.get().settings);
   render(html`<${App} />`, document.getElementById('app'));
 
-  global.PhoneAssist = { Store, startCall, playNext, toggleAutoplay, runTool, selectTool, getBestReply, askQuestion, setMode, speakAs, addLiveLine, resetAll, endCall };
+  global.PhoneAssist = { Store, startCall, playNext, toggleAutoplay, openDraft, runManualRow, resumeTask, settle, getBestReply, askQuestion, setMode, speakAs, addLiveLine, resetAll, endCall };
 })(window);
